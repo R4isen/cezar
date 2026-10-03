@@ -117,6 +117,7 @@ describe('agentHomePaths', () => {
     expect(paths.codex).toBe('/home/u/.codex');
     expect(paths.opencodeConfig).toBe('/home/u/.config/opencode');
     expect(paths.cursor).toBe('/home/u/.cursor');
+    expect(paths.grok).toBe('/home/u/.grok');
   });
 
   it('honors agent-specific home overrides', () => {
@@ -126,11 +127,13 @@ describe('agentHomePaths', () => {
       CODEX_HOME: '/opt/codex',
       CURSOR_CONFIG_DIR: '/opt/cursor',
       XDG_CONFIG_HOME: '/xdg',
+      GROK_HOME: '/opt/grok',
     } as NodeJS.ProcessEnv);
     expect(paths.claude).toBe('/opt/claude-klaudiusz');
     expect(paths.codex).toBe('/opt/codex');
     expect(paths.opencodeConfig).toBe('/xdg/opencode');
     expect(paths.cursor).toBe('/opt/cursor');
+    expect(paths.grok).toBe('/opt/grok');
   });
 
   it('ignores a blank CLAUDE_CONFIG_DIR rather than yielding a relative path', () => {

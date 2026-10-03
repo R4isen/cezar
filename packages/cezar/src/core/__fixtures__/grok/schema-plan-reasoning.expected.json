@@ -1,0 +1,141 @@
+[
+  {
+    "type": "turn.started",
+    "turnId": "turn_1"
+  },
+  {
+    "type": "plan.updated",
+    "entries": [
+      {
+        "content": "Edit hello.txt",
+        "status": "in_progress",
+        "priority": "high"
+      },
+      {
+        "content": "Stop",
+        "status": "pending",
+        "priority": "medium"
+      }
+    ]
+  },
+  {
+    "type": "item.started",
+    "item": {
+      "kind": "reasoning",
+      "id": "turn_1_reasoning_1",
+      "text": ""
+    }
+  },
+  {
+    "type": "item.delta",
+    "itemId": "turn_1_reasoning_1",
+    "field": "reasoning",
+    "delta": "The file needs a second line."
+  },
+  {
+    "type": "item.completed",
+    "item": {
+      "kind": "reasoning",
+      "id": "turn_1_reasoning_1",
+      "text": "The file needs a second line."
+    }
+  },
+  {
+    "type": "item.started",
+    "item": {
+      "kind": "tool",
+      "id": "call-edit-0",
+      "name": "search_replace",
+      "toolKind": "edit",
+      "title": "search_replace",
+      "status": "running",
+      "input": {
+        "file_path": "hello.txt"
+      }
+    }
+  },
+  {
+    "type": "item.completed",
+    "item": {
+      "kind": "tool",
+      "id": "call-edit-0",
+      "name": "search_replace",
+      "toolKind": "edit",
+      "title": "search_replace",
+      "status": "completed",
+      "input": {
+        "file_path": "hello.txt"
+      },
+      "diffs": [
+        {
+          "path": "hello.txt",
+          "oldText": "probe-line-one\n",
+          "newText": "probe-line-one\nprobe-line-two\n"
+        }
+      ]
+    }
+  },
+  {
+    "type": "item.started",
+    "item": {
+      "kind": "tool",
+      "id": "call-miss-0",
+      "name": "read_file",
+      "toolKind": "read",
+      "title": "read_file",
+      "status": "running",
+      "input": {
+        "target_file": "missing-nope.txt"
+      }
+    }
+  },
+  {
+    "type": "item.completed",
+    "item": {
+      "kind": "tool",
+      "id": "call-miss-0",
+      "name": "read_file",
+      "toolKind": "read",
+      "title": "read_file",
+      "status": "failed",
+      "input": {
+        "target_file": "missing-nope.txt"
+      },
+      "error": "ENOENT: missing-nope.txt"
+    }
+  },
+  {
+    "type": "item.started",
+    "item": {
+      "kind": "tool",
+      "id": "call-sub-0",
+      "name": "spawn_subagent",
+      "toolKind": "task",
+      "title": "spawn_subagent",
+      "status": "running",
+      "input": {
+        "description": "echo pong"
+      }
+    }
+  },
+  {
+    "type": "item.completed",
+    "item": {
+      "kind": "tool",
+      "id": "call-sub-0",
+      "name": "spawn_subagent",
+      "toolKind": "task",
+      "title": "spawn_subagent",
+      "status": "completed",
+      "input": {
+        "description": "echo pong"
+      },
+      "output": "pong"
+    }
+  },
+  {
+    "type": "turn.completed",
+    "turnId": "turn_1",
+    "stopReason": "end_turn"
+  }
+]

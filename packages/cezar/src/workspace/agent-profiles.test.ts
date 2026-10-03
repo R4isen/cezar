@@ -52,6 +52,7 @@ describe('agent profile resolution', () => {
       expect(defaultAgentProfile('opencode', env).path).toBe('/home/u/.config/opencode');
       expect(defaultAgentProfile('cursor', env).path).toBe('/home/u/.cursor');
       expect(defaultAgentProfile('copilot', env).path).toBe('/home/u/.copilot');
+      expect(defaultAgentProfile('grok', env).path).toBe('/home/u/.grok');
     });
 
     it('never hands one provider another vendor\'s home — the ternary chain\'s failure (#582)', () => {
@@ -70,10 +71,13 @@ describe('agent profile resolution', () => {
         CLAUDE_CONFIG_DIR: '/opt/claude',
         CURSOR_CONFIG_DIR: '/opt/cursor',
         COPILOT_HOME: '/opt/copilot',
+        GROK_HOME: '/opt/grok',
       } as NodeJS.ProcessEnv;
       expect(defaultAgentProfile('claude', relocated).path).toBe('/opt/claude');
       expect(defaultAgentProfile('cursor', relocated).path).toBe('/opt/cursor');
       expect(defaultAgentProfile('copilot', relocated).path).toBe('/opt/copilot');
+      // Files only. `PROFILE_ENV_VAR.grok` stays null, so this is not a second login.
+      expect(defaultAgentProfile('grok', relocated).path).toBe('/opt/grok');
     });
 
     it('is marked default so the UI can refuse to edit or delete it', () => {

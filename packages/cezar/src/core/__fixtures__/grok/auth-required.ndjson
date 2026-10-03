@@ -1,0 +1,5 @@
+{"fixture":{"source":"initialize auth-method list captured on grok 1.0.46 with an empty GROK_HOME (only grok.com, no cached_token). The session/new error text is the sentence `grok models` prints in that state: You are not authenticated. See README.md","cli":"grok 1.0.46 (2765805b9442) [stable]","docs":"~/.grok/docs/user-guide/02-authentication.md","verified":"2026-10-04","scenario":"no saved subscription login"}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true}},"authMethods":[{"id":"grok.com","name":"Grok"}]}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp/grok-probe","mcpServers":[],"_meta":{"yoloMode":true}}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"You are not authenticated. Run `grok login`."}}}

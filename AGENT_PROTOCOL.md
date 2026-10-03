@@ -335,6 +335,15 @@ transport into `UiEvent`s. The authoritative table is
 `__fixtures__/copilot/README.md` states exactly which of those frames are a live capture and
 which were read out of the CLI's own ACP bridge.
 
+`grok` uses that same ACP transport (`grok --no-auto-update agent --always-approve --no-leader stdio`,
+verified on grok 1.0.46). Its dialect (`core/grok-ui-mapper.ts`) reads the tool name and kind from
+`_meta["x.ai/tool"]` on the first `tool_call` — that frame has no ACP `kind` or `status` — and token
+counts from the `session/prompt` result's `_meta.usage` (`reasoningTokens`, `cachedReadTokens`,
+`cacheCreationTokens`). `spawn_subagent` is the task-kind cell; a live `tool_call` carried no parent
+id. Plan, reasoning, edit diffs and a failed tool are covered by a schema-derived fixture
+(`__fixtures__/grok/README.md`), the same provenance rule as junie. Auth is the saved SuperGrok or
+X Premium+ session (`grok login` / `cached_token`). Cezar does not send an API key over ACP.
+
 **Mapper robustness contract.** Inputs come off the wire and may be `null`,
 partial or malformed. A mapper **must never throw**: unparseable NDJSON lines are
 skipped (`packages/cezar/src/core/ndjson.ts` + the mapper), unknown message/content types

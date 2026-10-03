@@ -13,6 +13,8 @@ import type { AgentConfigFile, Runner } from '@open-mercato/cezar-api-client'
  * catalog names a pi-owned config file yet, so a pi entry would render three empty
  * groups. It gets a descriptor together with its catalog files. The tab list only
  * ever offers ids from this table, so `descriptorFor` cannot be reached with `pi`.
+ * `grok` is absent for the same reason: Grok Build keeps its login in `~/.grok` and
+ * has no settings file this pane should open. Do not invent catalog entries for it.
  * `copilot` (#582) is the opposite case and IS here: the catalog names its settings,
  * MCP and instruction files, so all three groups have something to show.
  *

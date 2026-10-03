@@ -52,6 +52,10 @@ export const KNOWN_PRESETS_BY_RUNNER: Record<RunnerId, readonly string[]> = {
   // `claude-sonnet-4`). Naming them here would make this guard reject a legitimate codex or
   // claude model as "another runner's preset" — the exact failure pi's comment warns about.
   copilot: [],
+  // Grok lists nothing for the same reason Junie does: `grok models` is the catalog, and a
+  // hardcoded id goes stale on the next model release. `defaultProvider: 'xai'` is the structural
+  // guard. The composer fallback is a single auto preset, which passes no `--model`.
+  grok: [],
 };
 
 /**

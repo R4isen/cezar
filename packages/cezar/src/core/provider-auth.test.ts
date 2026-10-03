@@ -70,6 +70,12 @@ const connectedResults: Record<string, ProviderCommandResult> = {
     stderr: '',
     exitCode: 0,
   },
+  // `grok models` exits 0 either way (grok 1.0.46). "logged in" is the connected sentence.
+  grok: {
+    stdout: 'You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n',
+    stderr: '',
+    exitCode: 0,
+  },
 };
 
 const originalEnv = {
@@ -81,6 +87,7 @@ const originalEnv = {
   CEZ_PI_BIN: process.env.CEZ_PI_BIN,
   CURSOR_API_KEY: process.env.CURSOR_API_KEY,
   CEZ_COPILOT_BIN: process.env.CEZ_COPILOT_BIN,
+  CEZ_GROK_BIN: process.env.CEZ_GROK_BIN,
 };
 
 beforeEach(() => {
@@ -92,6 +99,7 @@ beforeEach(() => {
   delete process.env.CEZ_PI_BIN;
   delete process.env.CURSOR_API_KEY;
   delete process.env.CEZ_COPILOT_BIN;
+  delete process.env.CEZ_GROK_BIN;
 });
 
 afterEach(() => {
@@ -113,6 +121,7 @@ function resultFor(executable: string): ProviderCommandResult {
   if (executable === 'agent' || executable.includes('cursor')) return connectedResults.cursor!;
   if (executable.includes('opencode')) return connectedResults.opencode!;
   if (executable.includes('copilot')) return connectedResults.copilot!;
+  if (executable.includes('grok')) return connectedResults.grok!;
   return connectedResults.pi!;
 }
 
@@ -686,6 +695,31 @@ describe('provider auth parsers', () => {
   });
 });
 
+describe('Grok `grok models` probe', () => {
+  it('reads a saved grok.com login as connected', async () => {
+    const service = new ProviderAuthService({ runCommand: runner() });
+    await expect(statuses(service)).resolves.toMatchObject({ grok: { status: 'connected' } });
+  });
+
+  it('treats "not logged in" as disconnected — that sentence contains "logged in"', async () => {
+    const service = new ProviderAuthService({
+      runCommand: runner((executable) => executable.includes('grok')
+        ? { stdout: 'You are not logged in. Run `grok login`.', stderr: '', exitCode: 0 }
+        : resultFor(executable)),
+    });
+    await expect(statuses(service)).resolves.toMatchObject({ grok: { status: 'disconnected' } });
+  });
+
+  it('treats "You are not authenticated." as disconnected', async () => {
+    const service = new ProviderAuthService({
+      runCommand: runner((executable) => executable.includes('grok')
+        ? { stdout: 'You are not authenticated.', stderr: '', exitCode: 0 }
+        : resultFor(executable)),
+    });
+    await expect(statuses(service)).resolves.toMatchObject({ grok: { status: 'disconnected' } });
+  });
+});
+
 describe('ProviderAuthService', () => {
   it('always returns every provider in descriptor order', async () => {
     const service = new ProviderAuthService({ runCommand: runner() });
@@ -699,6 +733,7 @@ describe('ProviderAuthService', () => {
         { provider: 'pi' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot' },
+        { provider: 'grok' },
       ],
     });
   });
@@ -723,6 +758,7 @@ describe('ProviderAuthService', () => {
       { executable: 'agent', args: ['status', '--format', 'json'], timeoutMs: 10_000 },
       { executable: 'pi', args: ['--list-models'], timeoutMs: 10_000 },
       { executable: 'copilot', args: ['--acp', '--no-auto-update'], timeoutMs: 10_000 },
+      { executable: 'grok', args: ['models'], timeoutMs: 10_000 },
     ]);
     release();
     await expect(pending).resolves.toBeDefined();
@@ -1252,6 +1288,7 @@ describe('ProviderAuthService', () => {
         { provider: 'pi', status: 'connected' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot', status: 'connected' },
+        { provider: 'grok', status: 'connected' },
       ],
     });
     expect(runCommand).not.toHaveBeenCalled();
@@ -1330,6 +1367,17 @@ describe('ProviderAuthService', () => {
     expect(service.loginCommand('pi')).toBe("'/tools/pi custom' /login");
   });
 
+  it('uses CEZ_GROK_BIN for the models probe and `grok login`', async () => {
+    process.env.CEZ_GROK_BIN = '/tools/grok custom';
+    const runCommand = runner((executable) =>
+      executable === '/tools/grok custom' ? connectedResults.grok! : resultFor(executable));
+    const service = new ProviderAuthService({ runCommand, platform: 'linux' });
+
+    await service.status();
+    expect(runCommand).toHaveBeenCalledWith('/tools/grok custom', ['models'], 10_000);
+    expect(service.loginCommand('grok')).toBe("'/tools/grok custom' login");
+  });
+
   it('uses the documented CEZ_CLAUDE_BIN override for both probe and login commands', async () => {
     process.env.CEZ_CLAUDE_BIN = '/tools/claude custom';
     const runCommand = runner((executable) =>
@@ -1365,6 +1413,7 @@ describe('ProviderAuthService', () => {
         { provider: 'pi', status: 'connected' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot', status: 'connected' },
+        { provider: 'grok', status: 'connected' },
       ],
     });
     expect(runCommand).not.toHaveBeenCalled();

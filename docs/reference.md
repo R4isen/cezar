@@ -488,6 +488,7 @@ Useful environment variables:
 | `CEZ_CURSOR_AGENT_BIN=/path/to/cursor-agent` | Override which Cursor Agent CLI binary is used. Unset: `cursor-agent` on PATH, then `~/.local/bin/cursor-agent`, then `agent` on PATH. |
 | `CEZ_PI_BIN=/path/to/pi` | Override which `pi` binary is used. |
 | `CEZ_COPILOT_BIN=/path/to/copilot` | Override which GitHub Copilot CLI binary is used. |
+| `CEZ_GROK_BIN=/path/to/grok` | Override which Grok Build CLI binary is used. The runner authenticates with the saved SuperGrok or X Premium+ session from `grok login`. |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | The agents' **own** variables, honoured where the vendor documents one. Setting one moves that agent's **default account** — the config folder cezar discovers. A *second* login of the same CLI is deliberately not an environment setting, since one process-wide value cannot differ per project: add it under **Settings → Agent accounts** and pick it per project. |
 | `CEZ_BROWSE_ROOT=~/` | Default root for **Add project → Open local folder…**. The picker cannot navigate above it; a saved workspace value overrides the environment default and must name an existing folder. |
 | `CEZ_PROJECTS_DIR=~/cezar/projects` | Default destination for **Clone from GitHub**. Saved workspace settings override it, and missing directories are created recursively. |
@@ -601,7 +602,7 @@ the API below.
 ## Coding agent backends
 
 cezar is not married to one vendor. Every agent step runs through a single
-`AgentRunner` seam with five built-in backends:
+`AgentRunner` seam:
 
 | Backend | CLI | How cezar drives it | Tool access |
 |---|---|---|---|
@@ -611,6 +612,7 @@ cezar is not married to one vendor. Every agent step runs through a single
 | **OpenCode** _(experimental)_ | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. | Ignores `allowedTools` entirely; every permission is auto-approved. |
 | **Cursor** | [`agent`](https://cursor.com/docs/cli/overview) (Cursor Agent CLI) | Headless print mode: `agent -p --force --trust --output-format stream-json`. Continue is fresh-session in v1 (print mode exits per turn). Its documented output carries no token/cost figures, so a Cursor run's header always reads zero tokens and no cost — that is the backend not reporting usage, not the run using nothing. | Ignores `allowedTools`; `--force` / `--trust` auto-approves tool use for unattended runs. |
 | **pi** _(experimental)_ | [`pi`](https://github.com/badlogic/pi-mono) | Persistent `--mode rpc` over JSONL; models are picked with the `provider/model` convention. | Maps `allowedTools` onto pi's `--tools` allowlist; a configured `bashAllowlist` disables Bash because pi cannot express command-prefix rules. |
+| **Grok Build** | [`grok`](https://x.ai/cli) | ACP over stdio: `grok --no-auto-update agent --always-approve --no-leader stdio`. Auth is the saved SuperGrok or X Premium+ session from `grok login` (`cached_token`). `--model` is sent only when a model is picked; resume is `grok --resume <sessionId>`. | Ignores `allowedTools`. `--always-approve` auto-approves tool use, and a permission request that still arrives is auto-approved. An `XAI_API_KEY` is the CLI's own fallback and is never sent over ACP by cezar. |
 
 > ⚠️ **Junie, OpenCode and pi support are experimental.** All three runners work
 > but are less battle-tested than the Claude Code and Codex backends, and Junie
@@ -618,13 +620,13 @@ cezar is not married to one vendor. Every agent step runs through a single
 > them as previews and expect rough edges.
 
 On startup cezar probes which CLIs are installed and the cockpit only offers
-the backends it found — install any one of the five and you're operational.
+the backends it found — install any one of them and you're operational.
 
 **Models come from your own machine.** The model picker does not ship a list of
-vendor releases that goes stale between cezar versions. For Claude, Codex, Cursor, Junie and
-OpenCode cezar asks the CLI on your host what *it* currently offers (Claude
+vendor releases that goes stale between cezar versions. For Claude, Codex, Cursor, Junie,
+OpenCode and Grok cezar asks the CLI on your host what *it* currently offers (Claude
 Code's `list_models` control request; the Codex app-server's `model/list`;
-Junie's ACP `session/new` config options; `opencode models`) and shows exactly
+Junie's ACP `session/new` config options; `opencode models`; `grok models`) and shows exactly
 that, in that order — so a model your account gained yesterday is selectable
 today with no cezar release, and one your provider retired stops being offered.
 Discovery is read-only, costs no tokens, and is cached briefly in memory. If the

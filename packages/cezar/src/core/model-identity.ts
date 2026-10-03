@@ -119,6 +119,10 @@ export const BACKEND_MODEL_MAP: Readonly<Record<AgentBackend, BackendModelMap>> 
   // the run (#405's invariant). Rejecting a bare id the way opencode and pi do would reject the
   // only form Copilot accepts.
   copilot: { defaultProvider: 'github' },
+  // Grok Build's `--model` takes a bare catalog id (`grok-4.7`). `xai` is the canonical-identity
+  // namespace only: `toBackendModel` returns `id.model`, and an explicit foreign `foo/bar` is
+  // rejected. Discovery fills the picker, so nothing dated is hardcoded here.
+  grok: { defaultProvider: 'xai' },
 };
 
 const SLASH = '/';

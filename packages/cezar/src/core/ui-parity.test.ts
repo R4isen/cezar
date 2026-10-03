@@ -26,6 +26,11 @@
  * replacing the schema-derived one — re-check this the next time junie's ACP surface
  * or model lineup changes materially.
  *
+ * Grok is another ACP dialect (`grok-ui-mapper.ts`). Its plan, reasoning, edit-diff and
+ * failed-tool rows are backed by `__fixtures__/grok/schema-plan-reasoning.*`, schema-derived
+ * the same way as junie's (see `__fixtures__/grok/README.md`). Grok's live `tool_call` carried
+ * no parent id. `spawn_subagent` is the task-kind cell; it is not in the nesting loop.
+ *
  * "sub-agent task items" and its nesting cell cannot exist on junie's wire:
  * junie speaks unmodified core ACP, whose `tool_call.kind` enum has no `task` value
  * and which publishes no wire shape for `nativeSubagentSessions` (see
@@ -42,7 +47,7 @@ import { describe, expect, it } from 'vitest';
 import type { UiEvent, UiItem } from './ui-events.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const BACKENDS = ['claude', 'codex', 'opencode', 'cursor', 'pi', 'junie', 'copilot'] as const;
+const BACKENDS = ['claude', 'codex', 'opencode', 'cursor', 'pi', 'junie', 'copilot', 'grok'] as const;
 
 /** Every event across every golden fixture of one backend. */
 function fixtureEvents(backend: (typeof BACKENDS)[number]): UiEvent[] {
@@ -141,6 +146,7 @@ describe('protocol v2 backend parity (all first-class mappers emit every matrix 
   // no parent-item id either — all three's matrix cell is the task-kind tool
   // items asserted above. junie (core ACP) has no parent attribution either, and
   // its task-kind substitute is excluded above for the same protocol reason.
+  // Grok's live `tool_call` carried no parent id (`__fixtures__/grok/README.md`).
   for (const backend of ['claude', 'opencode', 'copilot'] as const) {
     it(`${backend} nests sub-agent work via parentItemId`, () => {
       expect(items(fixtureEvents(backend)).some((item) => item.parentItemId !== undefined)).toBe(true);

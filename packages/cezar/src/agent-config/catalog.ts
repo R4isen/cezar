@@ -40,6 +40,8 @@ export interface AgentHomePaths {
   copilot: string;
   /** `~/.junie` — no relocation var documented (see `PROFILE_ENV_VAR.junie`) */
   junie: string;
+  /** `$GROK_HOME` or `~/.grok`. Relocates files only; not a second-account switch. */
+  grok: string;
 }
 
 export interface ConfigFileDef {

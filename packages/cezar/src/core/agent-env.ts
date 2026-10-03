@@ -241,6 +241,10 @@ export const BACKEND_ALLOW_PREFIXES: Record<AgentBackend, readonly string[]> = {
   // it authenticates with (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`) are already forwarded to every
   // backend below, and `COPILOT_GITHUB_TOKEN` is covered by this prefix — so nothing else widens.
   copilot: ['COPILOT_'],
+  // Subscription credentials live in `~/.grok/auth.json` (or `GROK_HOME`), not in the environment.
+  // `XAI_` is the CLI's own fallback (`XAI_API_KEY`) when no session is saved — forwarded so that
+  // fallback still works, never sent over ACP by cezar itself.
+  grok: ['GROK_', 'XAI_'],
 };
 
 /** `gh` handoff (draft PRs) works in every backend — the one credential the

@@ -53,13 +53,15 @@ const PROVIDER_HOME: Record<ProviderId, (home: ReturnType<typeof agentHomePaths>
   pi: (home) => home.claude,
   junie: (home) => home.junie,
   copilot: (home) => home.copilot,
+  grok: (home) => home.grok,
 };
 
 /**
  * The implicit account for a provider: whatever `agentHomePaths()` discovers, which already
  * honours the vendors' own `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `CURSOR_CONFIG_DIR` /
- * `COPILOT_HOME` / `XDG_CONFIG_HOME`. Setting one of those on the cezar process therefore moves
- * the DEFAULT account rather than being ignored.
+ * `COPILOT_HOME` / `XDG_CONFIG_HOME` / `GROK_HOME`. Setting one of those on the cezar process
+ * therefore moves the DEFAULT account's files rather than being ignored. `GROK_HOME` relocates
+ * files only — it is not a second-account switch (`PROFILE_ENV_VAR.grok` is null).
  */
 export function defaultAgentProfile(
   provider: ProviderId,

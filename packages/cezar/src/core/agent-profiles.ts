@@ -49,6 +49,10 @@ import type { ProviderId } from './provider-auth.ts';
  *   `GITHUB_TOKEN` ahead of any stored credential regardless. `null` until a test proves one
  *   variable moves both (spec 2026-09-19-runner-seam-native-backends Q14) — being wrong here
  *   bills the wrong account.
+ * - **grok** → `GROK_HOME` relocates files, but an empty `GROK_HOME` still received the machine
+ *   SuperGrok session when `authenticate` `cached_token` ran (probed 2026-10-04, grok 1.0.46).
+ *   The login is not isolated by that variable. `null` until a probe proves a second account
+ *   stays on its own subscription — being wrong here bills the wrong account.
  */
 export const PROFILE_ENV_VAR: Record<ProviderId, string | null> = {
   claude: 'CLAUDE_CONFIG_DIR',
@@ -58,6 +62,7 @@ export const PROFILE_ENV_VAR: Record<ProviderId, string | null> = {
   pi: null,
   junie: null,
   copilot: null,
+  grok: null,
 };
 
 /** Providers that can carry more than one account — what the UI offers "Add account" for. */
@@ -116,4 +121,6 @@ const PROFILE_DIR_MARKERS: Record<ProviderId, readonly string[]> = {
   junie: [],
   // Same for copilot (`PROFILE_ENV_VAR.copilot === null`).
   copilot: [],
+  // Same for grok (`PROFILE_ENV_VAR.grok === null`) — see the 2026-10-04 `GROK_HOME` probe above.
+  grok: [],
 };

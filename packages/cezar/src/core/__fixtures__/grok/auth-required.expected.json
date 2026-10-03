@@ -1,0 +1,7 @@
+[
+  {
+    "type": "session.error",
+    "message": "Grok CLI authentication failed — run `grok login` to use your SuperGrok or X Premium+ subscription.",
+    "fatal": true
+  }
+]

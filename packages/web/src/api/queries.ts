@@ -501,7 +501,8 @@ export function useRunnerModelCatalogs(
   const pi = useRunnerModels('pi', enabled)
   const junie = useRunnerModels('junie', enabled)
   const copilot = useRunnerModels('copilot', enabled)
-  return { claude, codex, junie, opencode, cursor, pi, copilot }
+  const grok = useRunnerModels('grok', enabled)
+  return { claude, codex, junie, opencode, cursor, pi, copilot, grok }
 }
 
 export function useProviderStatus() {

@@ -6,7 +6,7 @@ import { resolveClaudeBin } from './claude-bin.ts';
 const exec = promisify(execFile);
 
 export interface BackendCheck {
-  name: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'junie' | 'copilot' | 'gh' | 'git';
+  name: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'junie' | 'copilot' | 'grok' | 'gh' | 'git';
   available: boolean;
   version?: string;
   hint?: string;
@@ -14,7 +14,7 @@ export interface BackendCheck {
 
 /**
  * Probe the host for everything cez leans on: the agent CLIs (`claude`, and
- * the optional `codex` / `opencode` / `cursor` / `pi` / `junie` / `copilot`
+ * the optional `codex` / `opencode` / `cursor` / `pi` / `junie` / `copilot` / `grok`
  * alternatives), `gh` (GitHub auth for PR creation) and `git`. Nothing is required except at
  * least one agent CLI — the GUI degrades gracefully, only offers the
  * runners that are present, and shows the hints for the rest.
@@ -28,6 +28,7 @@ export async function detectEnvironment(): Promise<BackendCheck[]> {
     probePi(),
     probeJunie(),
     probeCopilot(),
+    probeGrok(),
     probeGh(),
     probeGit(),
   ]);
@@ -211,6 +212,38 @@ async function probeCopilot(): Promise<BackendCheck> {
       name: 'copilot',
       available: false,
       hint: 'optional: install GitHub Copilot CLI (`npm i -g @github/copilot`) and run `copilot login` to use the copilot runner',
+    };
+  }
+}
+
+async function probeGrok(): Promise<BackendCheck> {
+  // Dry-run stands the runner up on the bundled mock, so report it present.
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { name: 'grok', available: true, version: 'mock (CEZ_DRY_RUN=1)' };
+  }
+  const bin = process.env.CEZ_GROK_BIN ?? 'grok';
+  try {
+    // `--version` needs no login and spends no tokens. Auth is the provider descriptor's job.
+    const { stdout } = await exec(bin, ['--version'], { timeout: 10_000 });
+    const version = stdout.trim().split(/\r?\n/)[0] ?? '';
+    if (!/^grok\s+\d+\.\d+/i.test(version)) {
+      return {
+        name: 'grok',
+        available: false,
+        hint: `\`${bin}\` resolves but doesn't look like Grok Build (got: ${version.slice(0, 80)})`,
+      };
+    }
+    return {
+      name: 'grok',
+      available: true,
+      version,
+      hint: 'if not authenticated, run `grok login` (SuperGrok or X Premium+)',
+    };
+  } catch {
+    return {
+      name: 'grok',
+      available: false,
+      hint: 'optional: install Grok Build (`curl -fsSL https://x.ai/cli/install.sh | bash`) and run `grok login` to use the grok runner',
     };
   }
 }

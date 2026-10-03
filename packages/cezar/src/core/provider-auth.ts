@@ -8,7 +8,7 @@ import { resolveClaudeBin } from './claude-bin.ts';
 import { quoteExecutable, withEnvPrefix } from './shell-env.ts';
 import { probeJunieAuthentication } from './junie-auth-probe.ts';
 
-export const PROVIDER_IDS = ['claude', 'codex', 'opencode', 'cursor', 'pi', 'junie', 'copilot'] as const;
+export const PROVIDER_IDS = ['claude', 'codex', 'opencode', 'cursor', 'pi', 'junie', 'copilot', 'grok'] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 export type ProviderConnectionState =
   | 'connected'
@@ -315,6 +315,18 @@ function copilotAcpProbeStdin(): string {
   return `${JSON.stringify(initialize)}\n${JSON.stringify(newSession)}\n`;
 }
 
+/**
+ * `grok models` is read-only and spends no tokens. Both a saved login and a missing one exit 0
+ * (verified grok 1.0.46): "You are logged in with grok.com." versus "You are not authenticated."
+ * The negative is tested first — "not logged in" contains "logged in".
+ */
+function parseGrokStatus(result: ProviderCommandResult): ProviderConnectionState | null {
+  const output = `${result.stdout}\n${result.stderr}`;
+  if (/not authenticated|not logged in|authentication failed/i.test(output)) return 'disconnected';
+  if (/logged in/i.test(output)) return 'connected';
+  return null;
+}
+
 function parseCopilotStatus(result: ProviderCommandResult): ProviderConnectionState | null {
   const output = `${result.stdout}\n${result.stderr}`;
   // Order matters: an authenticated answer also contains the `initialize` result, and an
@@ -403,6 +415,15 @@ const DESCRIPTORS: readonly ProviderDescriptor[] = [
     parse: parseCopilotStatus,
     stdin: copilotAcpProbeStdin,
     unrecognizedHint: copilotUnrecognizedHint,
+  },
+  {
+    id: 'grok',
+    executable: () => process.env.CEZ_GROK_BIN ?? 'grok',
+    statusArgs: ['models'],
+    loginArgs: ['login'],
+    installHint:
+      'Install Grok Build (`curl -fsSL https://x.ai/cli/install.sh | bash`), then run `grok login` for SuperGrok or X Premium+.',
+    parse: parseGrokStatus,
   },
 ];
 

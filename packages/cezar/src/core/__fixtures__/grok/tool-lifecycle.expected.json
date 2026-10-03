@@ -1,0 +1,143 @@
+[
+  {
+    "type": "session.started",
+    "sessionId": "01a103d0-0000-7000-8000-0000000000a1",
+    "backend": "grok",
+    "model": "grok-4.7",
+    "cwd": "/tmp/grok-probe"
+  },
+  {
+    "type": "turn.started",
+    "turnId": "turn_1"
+  },
+  {
+    "type": "item.started",
+    "item": {
+      "kind": "tool",
+      "id": "call-read-0",
+      "name": "read_file",
+      "toolKind": "read",
+      "title": "read_file",
+      "status": "running",
+      "input": {
+        "target_file": "/tmp/grok-probe/hello.txt",
+        "limit": 5
+      }
+    }
+  },
+  {
+    "type": "item.updated",
+    "item": {
+      "kind": "tool",
+      "id": "call-read-0",
+      "name": "read_file",
+      "toolKind": "read",
+      "title": "Read `/tmp/grok-probe/hello.txt`",
+      "status": "running",
+      "input": {
+        "variant": "ReadFile",
+        "target_file": "/tmp/grok-probe/hello.txt",
+        "limit": 5
+      },
+      "locations": [
+        {
+          "path": "/tmp/grok-probe/hello.txt"
+        }
+      ]
+    }
+  },
+  {
+    "type": "item.completed",
+    "item": {
+      "kind": "tool",
+      "id": "call-read-0",
+      "name": "read_file",
+      "toolKind": "read",
+      "title": "Read `/tmp/grok-probe/hello.txt`",
+      "status": "completed",
+      "input": {
+        "variant": "ReadFile",
+        "target_file": "/tmp/grok-probe/hello.txt",
+        "limit": 5
+      },
+      "locations": [
+        {
+          "path": "/tmp/grok-probe/hello.txt"
+        }
+      ],
+      "output": "1→probe-line-one\n"
+    }
+  },
+  {
+    "type": "item.started",
+    "item": {
+      "kind": "message",
+      "id": "turn_1_msg_1",
+      "role": "assistant",
+      "text": ""
+    }
+  },
+  {
+    "type": "item.delta",
+    "itemId": "turn_1_msg_1",
+    "field": "text",
+    "delta": "probe"
+  },
+  {
+    "type": "item.delta",
+    "itemId": "turn_1_msg_1",
+    "field": "text",
+    "delta": "-"
+  },
+  {
+    "type": "item.delta",
+    "itemId": "turn_1_msg_1",
+    "field": "text",
+    "delta": "line"
+  },
+  {
+    "type": "item.delta",
+    "itemId": "turn_1_msg_1",
+    "field": "text",
+    "delta": "-"
+  },
+  {
+    "type": "item.delta",
+    "itemId": "turn_1_msg_1",
+    "field": "text",
+    "delta": "one"
+  },
+  {
+    "type": "item.completed",
+    "item": {
+      "kind": "message",
+      "id": "turn_1_msg_1",
+      "role": "assistant",
+      "text": "probe-line-one"
+    }
+  },
+  {
+    "type": "usage.updated",
+    "usage": {
+      "input": 32866,
+      "output": 92,
+      "total": 32958,
+      "cacheRead": 18048,
+      "cacheWrite": 0,
+      "reasoning": 61
+    }
+  },
+  {
+    "type": "turn.completed",
+    "turnId": "turn_1",
+    "stopReason": "end_turn",
+    "usage": {
+      "input": 32866,
+      "output": 92,
+      "total": 32958,
+      "cacheRead": 18048,
+      "cacheWrite": 0,
+      "reasoning": 61
+    }
+  }
+]

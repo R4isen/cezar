@@ -50,8 +50,10 @@ describe('opencode-http', () => {
   it('sends a JSON body and returns the status with the raw response text', async () => {
     let seen = '';
     let seenType = '';
+    let seenAuthorization = '';
     const base = await serve((req, res) => {
       seenType = String(req.headers['content-type'] ?? '');
+      seenAuthorization = String(req.headers.authorization ?? '');
       let body = '';
       req.on('data', (c) => (body += c));
       req.on('end', () => {
@@ -61,10 +63,15 @@ describe('opencode-http', () => {
       });
     });
 
-    const res = await opencodeRequest(`${base}/session`, { method: 'POST', body: { title: 'cezar task' } });
+    const res = await opencodeRequest(`${base}/api/session`, {
+      method: 'POST',
+      body: { title: 'cezar task' },
+      authorization: 'Basic dXNlcjpwYXNz',
+    });
 
     expect(seen).toBe('{"title":"cezar task"}');
     expect(seenType).toBe('application/json');
+    expect(seenAuthorization).toBe('Basic dXNlcjpwYXNz');
     expect(res).toEqual({ status: 200, body: '{"id":"ses_1"}' });
   });
 
@@ -76,7 +83,7 @@ describe('opencode-http', () => {
       res.end();
     });
 
-    const res = await opencodeRequest(`${base}/session/x/abort`, { method: 'POST' });
+    const res = await opencodeRequest(`${base}/api/session/x/abort`, { method: 'POST' });
 
     expect(seenType).toBeUndefined();
     expect(res).toEqual({ status: 204, body: '' });
@@ -88,7 +95,7 @@ describe('opencode-http', () => {
       res.end('unknown model');
     });
 
-    await expect(opencodeRequest(`${base}/session/x/message`, { method: 'POST', body: {} })).resolves.toEqual({
+    await expect(opencodeRequest(`${base}/api/session/x/prompt`, { method: 'POST', body: {} })).resolves.toEqual({
       status: 400,
       body: 'unknown model',
     });
@@ -108,7 +115,7 @@ describe('opencode-http', () => {
     });
 
     const started = Date.now();
-    const res = await opencodeRequest(`${base}/session/x/message`, { method: 'POST', body: {} });
+    const res = await opencodeRequest(`${base}/api/session/x/prompt`, { method: 'POST', body: {} });
 
     expect(res).toEqual({ status: 200, body: '{"ok":true}' });
     expect(Date.now() - started).toBeGreaterThanOrEqual(500);
@@ -119,7 +126,7 @@ describe('opencode-http', () => {
       res.destroy();
     });
 
-    const err = await opencodeRequest(`${base}/session/x/message`, { method: 'POST', body: {} }).catch(
+    const err = await opencodeRequest(`${base}/api/session/x/prompt`, { method: 'POST', body: {} }).catch(
       (e: unknown) => e,
     );
 
@@ -129,7 +136,7 @@ describe('opencode-http', () => {
   it('a server that is not there rejects with OpencodeTransportError', async () => {
     const base = await deadPort();
 
-    const err = await opencodeRequest(`${base}/session`, { method: 'POST', body: {} }).catch((e: unknown) => e);
+    const err = await opencodeRequest(`${base}/api/session`, { method: 'POST', body: {} }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(OpencodeTransportError);
   });
@@ -139,7 +146,7 @@ describe('opencode-http', () => {
       // never answers
     });
     const ac = new AbortController();
-    const pending = opencodeRequest(`${base}/session/x/message`, {
+    const pending = opencodeRequest(`${base}/api/session/x/prompt`, {
       method: 'POST',
       body: {},
       signal: ac.signal,
@@ -153,7 +160,9 @@ describe('opencode-http', () => {
     it('resolves on the HEADERS, then delivers whole frames split on the blank line', async () => {
       let push: ((chunk: string) => void) | undefined;
       let finish: (() => void) | undefined;
+      let seenAuthorization = '';
       const base = await serve((_req, res) => {
+        seenAuthorization = String(_req.headers.authorization ?? '');
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.flushHeaders();
         push = (chunk) => res.write(chunk);
@@ -162,7 +171,8 @@ describe('opencode-http', () => {
 
       const frames: string[] = [];
       let closed = false;
-      const connected = await openOpencodeEventStream(`${base}/event`, {
+      const connected = await openOpencodeEventStream(`${base}/api/event`, {
+        authorization: 'Basic dXNlcjpwYXNz',
         onFrame: (f) => frames.push(f),
         onClose: () => {
           closed = true;
@@ -170,6 +180,7 @@ describe('opencode-http', () => {
       });
 
       expect(connected).toBe(true);
+      expect(seenAuthorization).toBe('Basic dXNlcjpwYXNz');
       expect(frames).toEqual([]); // headers only so far — nothing streamed yet
 
       // A frame arriving in two writes must surface once, whole.
@@ -192,7 +203,7 @@ describe('opencode-http', () => {
       });
 
       let closed = false;
-      const connected = await openOpencodeEventStream(`${base}/event`, {
+      const connected = await openOpencodeEventStream(`${base}/api/event`, {
         onFrame: () => undefined,
         onClose: () => {
           closed = true;
@@ -206,7 +217,7 @@ describe('opencode-http', () => {
     it('a server that is not there is "not connected"', async () => {
       const base = await deadPort();
 
-      expect(await openOpencodeEventStream(`${base}/event`, { onFrame: () => undefined })).toBe(false);
+      expect(await openOpencodeEventStream(`${base}/api/event`, { onFrame: () => undefined })).toBe(false);
     });
 
     it('aborting a live stream reports the close exactly once', async () => {
@@ -217,7 +228,7 @@ describe('opencode-http', () => {
 
       const ac = new AbortController();
       let closes = 0;
-      const connected = await openOpencodeEventStream(`${base}/event`, {
+      const connected = await openOpencodeEventStream(`${base}/api/event`, {
         signal: ac.signal,
         onFrame: () => undefined,
         onClose: () => {

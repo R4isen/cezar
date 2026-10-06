@@ -1,17 +1,13 @@
 #!/usr/bin/env node
 // Test-only mock of `opencode serve` — speaks just enough of the HTTP+SSE
 // API (§4 of agent-event-protocols.md) for the runner wiring test in
-// `opencode-ui-mapper.test.ts`: POST /session, GET /event (SSE bus), one
-// scripted prompt turn. Deliberately reproduces the real server's ordering
-// quirk that motivates the v2 turn-end fix: the HTTP prompt response
-// resolves BEFORE the final SSE parts and the `session.idle` — so a correct
-// v2 stream must take `turn.completed` from `session.idle`, not from the
-// HTTP response.
+// `opencode-ui-mapper.test.ts`: POST /api/session, GET /api/event (SSE bus), and
+// scripted prompt admissions. `MOCK_V2_EVENTS=1` emits the v2 execution stream.
 //
 // Four scripts, selected by a marker in the prompt text, so the #897 shapes
 // are reproducible without waiting five real minutes:
 //   (default)     the ordering quirk above — respond, then stream, then idle.
-//   `#drop-post`  destroy the message POST's socket mid-turn WITHOUT a
+//   `#drop-post`  destroy the prompt admission POST's socket WITHOUT a
 //                 response, keep streaming parts, send `session.idle` later.
 //                 This is what undici's 300 s headersTimeout/bodyTimeout did to
 //                 a long turn, from the client's point of view: the request is
@@ -38,6 +34,7 @@ const port = Number(arg('--port', '0'));
 
 const SESSION_ID = 'ses_mock_1';
 const MESSAGE_ID = 'msg_mock_1';
+const expectedAuthorization = `Basic ${Buffer.from(`${process.env.OPENCODE_SERVER_USERNAME}:${process.env.OPENCODE_SERVER_PASSWORD}`).toString('base64')}`;
 
 /** Turn 1 keeps the original ids (the golden wiring test pins them); later
  *  turns get their own message and part ids, as a real server would. */
@@ -66,9 +63,89 @@ const info = (extra) => ({
   ...extra,
 });
 
+function sendV2Turn(failed = false) {
+  const currentSuffix = suffix();
+  const assistantMessageID = `${MESSAGE_ID}_assistant${currentSuffix}`;
+  const event = (type, data) => send({ id: `evt_${turn}_${type}`, type, data });
+  event('session.execution.started', { sessionID: SESSION_ID });
+  event('session.step.started', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    agent: 'build',
+    model: { id: 'mock-model', providerID: 'mock' },
+  });
+  event('session.text.started', { sessionID: SESSION_ID, assistantMessageID, ordinal: 1 });
+  event('session.text.delta', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    ordinal: 1,
+    delta: 'Checking the working tree.',
+  });
+  event('session.text.ended', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    ordinal: 1,
+    text: 'Checking the working tree.',
+  });
+  event('session.tool.input.started', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    id: `call_mock_1${currentSuffix}`,
+    name: 'bash',
+  });
+  event('session.tool.called', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    id: `call_mock_1${currentSuffix}`,
+    name: 'bash',
+    input: { command: 'git status --short' },
+  });
+  event('session.tool.success', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    id: `call_mock_1${currentSuffix}`,
+    content: [{ type: 'text', text: ' M src/example.ts\n' }],
+    metadata: { exitCode: 0 },
+  });
+  event('session.text.started', { sessionID: SESSION_ID, assistantMessageID, ordinal: 2 });
+  event('session.text.delta', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    ordinal: 2,
+    delta: 'Done.',
+  });
+  event('session.text.ended', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    ordinal: 2,
+    text: 'Done.',
+  });
+  event('session.step.ended', {
+    sessionID: SESSION_ID,
+    assistantMessageID,
+    finish: 'stop',
+    cost: 0.0021,
+    tokens: { input: 1200, output: 300, reasoning: 0, cache: { read: 0, write: 0 } },
+  });
+  if (failed) {
+    event('session.execution.failed', {
+      sessionID: SESSION_ID,
+      error: { type: 'ProviderError', message: 'mock provider unavailable' },
+    });
+  } else {
+    event('session.execution.succeeded', { sessionID: SESSION_ID });
+  }
+}
+
 const server = createServer((req, res) => {
   const url = req.url ?? '';
-  if (req.method === 'GET' && url.startsWith('/event')) {
+  if (req.headers.authorization !== expectedAuthorization) {
+    req.resume();
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end('{"_tag":"UnauthorizedError","message":"Authentication required"}');
+    return;
+  }
+  if (req.method === 'GET' && url.startsWith('/api/event')) {
     if (process.env.MOCK_NO_EVENT_BUS === '1') {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('no event bus');
@@ -82,9 +159,9 @@ const server = createServer((req, res) => {
   let body = '';
   req.on('data', (chunk) => (body += chunk));
   req.on('end', () => {
-    if (req.method === 'POST' && url === '/session') {
+    if (req.method === 'POST' && url === '/api/session') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ id: SESSION_ID, title: 'cezar task' }));
+      res.end(JSON.stringify({ data: { id: SESSION_ID, title: 'cezar task' } }));
       return;
     }
     // The current reply route, or — under `MOCK_LEGACY_PERMISSION=1`, a server
@@ -123,7 +200,7 @@ const server = createServer((req, res) => {
       const MESSAGE_ID = messageId();
       const promptText = (() => {
         try {
-          return JSON.parse(body).parts.map((p) => p.text ?? '').join('\n');
+          return JSON.parse(body).text ?? '';
         } catch {
           return '';
         }
@@ -268,10 +345,9 @@ const server = createServer((req, res) => {
           info: info({ cost: 0.0021, tokens: { input: 1200, output: 300, reasoning: 0, cache: { read: 0, write: 0 } } }),
         },
       });
-      // Respond to the prompt POST now — BEFORE the final text part and the
-      // idle signal, like the real server under streaming load.
+      // V2 returns an admission receipt; execution continues over SSE.
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ info: info({ cost: 0.0021 }), parts: [] }));
+      res.end(JSON.stringify({ data: { id: messageId(), sessionID: SESSION_ID, type: 'user', payload: { text: promptText }, delivery: 'steer' } }));
       setTimeout(() => {
         send({
           type: 'message.part.updated',
@@ -292,7 +368,7 @@ const server = createServer((req, res) => {
       }
       return;
     }
-    res.writeHead(200, { 'content-type': 'application/json' });
+    res.writeHead(404, { 'content-type': 'application/json' });
     res.end('{}');
   });
 });

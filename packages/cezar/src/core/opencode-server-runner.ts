@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -44,15 +45,9 @@ const SERVER_START_TIMEOUT_MS = 30_000;
 export const KILL_GRACE_MS = 4_000;
 
 /**
- * How long a turn waits for a `session.idle` that never comes, once the prompt
- * POST has settled and the event bus has gone quiet.
- *
- * `session.idle` is the turn boundary (#897), and the window below is the
- * transition out of the state that signal would otherwise be the only exit
- * from: an opencode build that does not emit it still ends its turn. Every
- * `message.*` frame re-arms the window, so a session that is genuinely working
- * — the case this whole fix is about — never trips it. This is NOT the
- * configurable agent-step wall clock (#880); that deadline is untouched.
+ * How long to wait for an execution start after a prompt is admitted when the
+ * event stream has gone quiet. Once v2 execution starts, the runner waits for
+ * its terminal event or the independent agent-step deadline (#880).
  */
 export const TURN_IDLE_GRACE_MS = 5_000;
 
@@ -107,6 +102,7 @@ class OpencodeSession implements AgentSession {
   readonly result: Promise<AgentRunResult>;
 
   private readonly child!: ChildProcessWithoutNullStreams;
+  private readonly authorization: string;
   /** "Has the server actually terminated?" — never `child.killed`, which only
    *  reports delivery and would disarm the escalation (#844/#858). */
   private readonly hasExited: () => boolean;
@@ -140,6 +136,7 @@ class OpencodeSession implements AgentSession {
   /** Has this turn's prompt POST settled (either way)? Until it has, nothing
    *  synthesizes a turn end — only the wire does. */
   private turnPostSettled = false;
+  private executionStarted = false;
   /** Resolves the in-flight turn's `prompt()` — called from `finishTurn()`. */
   private endTurn: (() => void) | undefined;
   private turnGraceTimer: NodeJS.Timeout | undefined;
@@ -173,8 +170,17 @@ class OpencodeSession implements AgentSession {
   ) {
     // Random high port; the actual bound URL is read back from stdout.
     const port = 40000 + Math.floor(Math.random() * 20000);
+    const password = randomBytes(32).toString('base64url');
+    this.authorization = `Basic ${Buffer.from(`opencode:${password}`, 'utf8').toString('base64')}`;
     try {
-      const env = buildChildEnv({ backend: 'opencode', extraEnv: spec.env });
+      const env = buildChildEnv({
+        backend: 'opencode',
+        extraEnv: {
+          ...spec.env,
+          OPENCODE_SERVER_USERNAME: 'opencode',
+          OPENCODE_SERVER_PASSWORD: password,
+        },
+      });
       // Private MCP servers (spec 2026-10-07-private-project-mcp): OpenCode loads
       // OPENCODE_CONFIG_CONTENT after the project config, so these are added and win on a clash.
       if (spec.mcpServers?.length) {
@@ -244,7 +250,6 @@ class OpencodeSession implements AgentSession {
         this.serverOpen = false;
         this.terminate();
       }
-
       await this.exited;
       if (this.spawnFailed) throw this.spawnFailed;
 
@@ -304,7 +309,7 @@ class OpencodeSession implements AgentSession {
   interrupt(): void {
     this.serverOpen = false;
     if (this.baseUrl && this.sessionId) {
-      void this.http('POST', `/session/${this.sessionId}/abort`, undefined).catch(() => undefined);
+      void this.http('POST', `/api/session/${this.sessionId}/abort`, undefined).catch(() => undefined);
     }
     this.finishTurn();
     this.sse.abort();
@@ -378,8 +383,11 @@ class OpencodeSession implements AgentSession {
   }
 
   private async bootstrap(): Promise<void> {
-    const created = await this.http('POST', '/session', { title: 'cezar task' });
-    this.sessionId = stringField(created, 'id');
+    const createBody: Record<string, unknown> = { title: 'cezar task' };
+    const model = parseModelIdentity(this.spec.model);
+    if (model) createBody.model = { id: model.model, providerID: model.provider };
+    const created = await this.http('POST', '/api/session', createBody);
+    this.sessionId = stringField(objectField(created, 'data') ?? created, 'id');
     if (!this.sessionId) throw new Error('opencode did not return a session id');
     this.emit({ type: 'session', sessionId: this.sessionId });
     const sessionId = this.sessionId;
@@ -398,14 +406,10 @@ class OpencodeSession implements AgentSession {
    * Post one prompt and resolve when the TURN ends — not when the HTTP
    * response does.
    *
-   * Opencode holds `POST /session/:id/message` open for the whole turn, so the
-   * response is neither a reliable nor a timely boundary: it lands before the
-   * final text part (the bundled mock exists to pin that ordering), and when
-   * the transport drops it mid-turn the turn has not ended at all. Reading it
-   * as the boundary is what parked live runs under "Needs you" at exactly 5:00
-   * (#897). The end comes from the wire `session.idle`, the same signal v2 has
-   * always used, with `armTurnGrace()` as the bounded way out when no such
-   * signal is coming.
+  * The v2 prompt endpoint returns an admission receipt, not a completed turn.
+  * The turn ends on the execution terminal event. A grace timer covers an
+  * admitted prompt for which execution never starts; the independent run
+  * deadline bounds a started execution that never terminates.
    */
   private async prompt(text: string): Promise<void> {
     if (!this.sessionId) return;
@@ -420,22 +424,17 @@ class OpencodeSession implements AgentSession {
     }
     this.turnInFlight = true;
     this.turnPostSettled = false;
+    this.executionStarted = false;
     this.turnDropped = undefined;
     const turnEnded = new Promise<void>((resolve) => {
       this.endTurn = resolve;
     });
     // v2 turn boundary — the prompt POST is the turn start (§7.1).
     this.emitUi(opencodeTurnStarted);
-    const body: Record<string, unknown> = { parts: [{ type: 'text', text }] };
-    // `spec.model` arrives already normalised to canonical `provider/model`
-    // (the run wiring's fail-loud gate). Split it with the shared parser — the
-    // one every runner uses — into opencode's `{ providerID, modelID }`.
-    const id = parseModelIdentity(this.spec.model);
-    if (id) body.model = { providerID: id.provider, modelID: id.model };
+    const body = { text };
     let failure: unknown;
     try {
-      const res = await this.http('POST', `/session/${this.sessionId}/message`, body);
-      this.absorbUsage(res);
+      await this.http('POST', `/api/session/${this.sessionId}/prompt`, body);
     } catch (err) {
       // A transport drop on a session the event bus still shows alive is no
       // evidence about the agent — swallow it and keep listening. Anything
@@ -467,9 +466,10 @@ class OpencodeSession implements AgentSession {
    * then, so a server that really did die does not go quiet just because #897
    * stopped a live one from being parked.
    */
-  private finishTurn(fromIdle = false): void {
+  private finishTurn(fromWireTerminal = false): void {
     if (!this.turnInFlight) return;
     this.turnInFlight = false;
+    this.executionStarted = false;
     if (this.turnGraceTimer) {
       clearTimeout(this.turnGraceTimer);
       this.turnGraceTimer = undefined;
@@ -479,7 +479,7 @@ class OpencodeSession implements AgentSession {
     // A part that never saw `time.end` (abort, server quirk) still surfaces
     // its prose before the turn boundary (run.ts reads markers there).
     this.textCoalescer.flush();
-    if (dropped !== undefined && !fromIdle) {
+    if (dropped !== undefined && !fromWireTerminal) {
       this.emit({ type: 'note', message: `opencode: prompt failed: ${dropped}` });
     }
     this.emit({ type: 'turn-end' });
@@ -508,6 +508,7 @@ class OpencodeSession implements AgentSession {
       this.finishTurn();
       return;
     }
+    if (this.executionStarted) return;
     this.turnGraceTimer = setTimeout(() => this.finishTurn(), TURN_IDLE_GRACE_MS);
     this.turnGraceTimer.unref?.();
   }
@@ -527,8 +528,9 @@ class OpencodeSession implements AgentSession {
    *  event emitted after this resolves can be missed. */
   private async consumeEvents(): Promise<void> {
     if (!this.baseUrl) return;
-    this.sseConnected = await openOpencodeEventStream(`${this.baseUrl}/event`, {
+    this.sseConnected = await openOpencodeEventStream(`${this.baseUrl}/api/event`, {
       signal: this.sse.signal,
+      authorization: this.authorization,
       onFrame: (frame) => this.handleFrame(frame),
       // The bus is the turn's evidence of life; once it is gone a turn waiting
       // on `session.idle` would wait forever.
@@ -557,8 +559,75 @@ class OpencodeSession implements AgentSession {
 
   private handleEvent(evt: OpencodeEvent): void {
     const type = evt.type ?? '';
-    const props = evt.properties ?? {};
-    if (type === 'message.updated' || type === 'message.created' || type === 'message.completed') {
+    const props = evt.properties ?? evt.data ?? {};
+    const sessionID = stringField(props, 'sessionID');
+    if (type === 'session.execution.started') {
+      if (sessionID === undefined || sessionID === this.sessionId) {
+        this.executionStarted = true;
+        if (this.turnGraceTimer) clearTimeout(this.turnGraceTimer);
+        this.turnGraceTimer = undefined;
+      }
+    } else if (
+      type === 'session.execution.succeeded'
+      || type === 'session.execution.failed'
+      || type === 'session.execution.interrupted'
+    ) {
+      if (type === 'session.execution.failed' && (sessionID === undefined || sessionID === this.sessionId)) {
+        const message = props.error === undefined ? 'OpenCode execution failed' : safeStringify(props.error);
+        this.emit({ type: 'error', message: `opencode: ${message}` });
+      }
+      if (sessionID === undefined || sessionID === this.sessionId) this.finishTurn(true);
+    } else if (type === 'session.text.delta' || type === 'session.next.text.delta') {
+      const id = stringField(props, 'textID') ?? v2TextID(props, 'text');
+      const delta = stringField(props, 'delta');
+      if (id && delta !== undefined) this.textCoalescer.append(id, delta);
+    } else if (type === 'session.text.ended' || type === 'session.next.text.ended') {
+      const id = stringField(props, 'textID') ?? v2TextID(props, 'text');
+      const text = stringField(props, 'text');
+      if (id && text !== undefined) this.textCoalescer.complete(id, text);
+    } else if (type === 'session.tool.called' || type === 'session.next.tool.called') {
+      const callId = stringField(props, 'callID') ?? stringField(props, 'id');
+      const name = stringField(props, 'tool') ?? stringField(props, 'name');
+      if (callId && name && !this.toolsSeen.has(callId)) {
+        const input = props.input ?? {};
+        this.toolsSeen.add(callId);
+        this.toolCalls.push({ id: callId, name, input });
+        this.emit({ type: 'tool-call', id: callId, tool: name, input });
+      }
+    } else if (
+      type === 'session.tool.success'
+      || type === 'session.tool.failed'
+      || type === 'session.next.tool.success'
+      || type === 'session.next.tool.failed'
+    ) {
+      const callId = stringField(props, 'callID') ?? stringField(props, 'id');
+      if (callId) {
+        const content = Array.isArray(props.content)
+          ? props.content
+              .map((item) => item !== null && typeof item === 'object' ? stringField(item as Record<string, unknown>, 'text') ?? '' : '')
+              .filter(Boolean)
+              .join('\n')
+          : undefined;
+        this.emit({
+          type: 'tool-result',
+          toolCallId: callId,
+          result: safeStringify(props.result ?? content ?? props.structured ?? props.metadata ?? {}),
+          isError: type.endsWith('.failed'),
+        });
+      }
+    } else if (type === 'session.step.ended' || type === 'session.next.step.ended') {
+      const tokens = (props.tokens as Record<string, unknown> | undefined) ?? {};
+      const total = numField(tokens, 'input') + numField(tokens, 'output') + numField(tokens, 'reasoning');
+      if (total > 0) {
+        this.tokensUsed += total;
+        this.emit({ type: 'token-usage', tokensUsed: this.tokensUsed });
+      }
+      const cost = props.cost;
+      if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) {
+        this.lastCost = (this.lastCost ?? 0) + cost;
+        this.emit({ type: 'cost', usd: cost });
+      }
+    } else if (type === 'message.updated' || type === 'message.created' || type === 'message.completed') {
       const info = (props.info as Record<string, unknown>) ?? props;
       const mid = stringField(info, 'id');
       const role = stringField(info, 'role');
@@ -682,7 +751,11 @@ class OpencodeSession implements AgentSession {
     body: unknown,
   ): Promise<Record<string, unknown>> {
     if (!this.baseUrl) throw new Error('opencode server not ready');
-    const res = await opencodeRequest(`${this.baseUrl}${path}`, { method, body });
+    const res = await opencodeRequest(`${this.baseUrl}${path}`, {
+      method,
+      body,
+      authorization: this.authorization,
+    });
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`${method} ${path} → ${res.status} ${res.body.slice(0, 200)}`);
     }
@@ -718,6 +791,7 @@ class OpencodeSession implements AgentSession {
 interface OpencodeEvent {
   type?: string;
   properties?: Record<string, unknown>;
+  data?: Record<string, unknown>;
 }
 
 function textOf(content: ContentBlock[]): string {
@@ -784,6 +858,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function stringField(obj: Record<string, unknown>, key: string): string | undefined {
   const v = obj[key];
   return typeof v === 'string' ? v : undefined;
+}
+
+function v2TextID(props: Record<string, unknown>, field: 'text' | 'reasoning'): string | undefined {
+  const assistantMessageID = stringField(props, 'assistantMessageID');
+  const ordinal = props.ordinal;
+  if (assistantMessageID === undefined || typeof ordinal !== 'number') return undefined;
+  return `${assistantMessageID}:${field}:${ordinal}`;
+}
+
+function objectField(obj: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = obj[key];
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function numField(obj: Record<string, unknown>, key: string): number {

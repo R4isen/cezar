@@ -163,6 +163,7 @@ describe('mapOpencodeEvent edge cases', () => {
       { type: 'item.started', item: { kind: 'message', id: 'prt_t', role: 'assistant', text: '' } },
       { type: 'item.delta', itemId: 'prt_t', field: 'text', delta: 'Hello' },
     ]);
+
     state = first.state;
     // Retransmit of the same accumulated text → no delta.
     expect(mapOpencodeEvent(part({ id: 'prt_t', type: 'text', text: 'Hello' }), state).events).toEqual([]);
@@ -173,6 +174,81 @@ describe('mapOpencodeEvent edge cases', () => {
     expect(grown.events).toEqual([{ type: 'item.delta', itemId: 'prt_t', field: 'text', delta: ' world' }]);
     // …without mutating the previous state (explicit-state contract).
     expect(mapOpencodeEvent(part({ id: 'prt_t', type: 'text', text: 'Hello world' }), state).events).toHaveLength(1);
+  });
+
+  it('maps v2 text deltas and completes the turn on execution success', () => {
+    let state = startedState();
+    const started = mapOpencodeEvent({
+      type: 'session.text.started',
+      data: { sessionID: SESSION_ID, assistantMessageID: 'msg_a', ordinal: 1 },
+    }, state);
+    expect(started.events).toEqual([
+      { type: 'item.started', item: { kind: 'message', id: 'msg_a:text:1', role: 'assistant', text: '' } },
+    ]);
+    state = started.state;
+
+    const delta = mapOpencodeEvent({
+      type: 'session.text.delta',
+      data: { sessionID: SESSION_ID, assistantMessageID: 'msg_a', ordinal: 1, delta: 'Hello v2' },
+    }, state);
+    expect(delta.events).toEqual([{ type: 'item.delta', itemId: 'msg_a:text:1', field: 'text', delta: 'Hello v2' }]);
+    state = delta.state;
+
+    const ended = mapOpencodeEvent({
+      type: 'session.text.ended',
+      data: { sessionID: SESSION_ID, assistantMessageID: 'msg_a', ordinal: 1, text: 'Hello v2' },
+    }, state);
+    expect(ended.events).toEqual([
+      { type: 'item.completed', item: { kind: 'message', id: 'msg_a:text:1', role: 'assistant', text: 'Hello v2' } },
+    ]);
+
+    const completed = mapOpencodeEvent({
+      type: 'session.execution.succeeded',
+      data: { sessionID: SESSION_ID },
+    }, ended.state);
+    expect(completed.events).toMatchObject([{ type: 'turn.completed', stopReason: 'end_turn' }]);
+  });
+
+  it('maps v2 tool calls through their completion payload', () => {
+    const pending = mapOpencodeEvent({
+      type: 'session.tool.input.started',
+      data: {
+        sessionID: SESSION_ID,
+        assistantMessageID: 'msg_a',
+        id: 'call_v2',
+        name: 'bash',
+      },
+    }, startedState());
+    expect(pending.events).toMatchObject([
+      { type: 'item.started', item: { kind: 'tool', id: 'call_v2', name: 'bash', status: 'pending' } },
+    ]);
+
+    const called = mapOpencodeEvent({
+      type: 'session.tool.called',
+      data: {
+        sessionID: SESSION_ID,
+        assistantMessageID: 'msg_a',
+        id: 'call_v2',
+        name: 'bash',
+        input: { command: 'echo v2' },
+      },
+    }, pending.state);
+    expect(called.events).toMatchObject([
+      { type: 'item.updated', item: { kind: 'tool', id: 'call_v2', name: 'bash', status: 'running', input: { command: 'echo v2' } } },
+    ]);
+
+    const completed = mapOpencodeEvent({
+      type: 'session.tool.success',
+      data: {
+        sessionID: SESSION_ID,
+        assistantMessageID: 'msg_a',
+        id: 'call_v2',
+        content: [{ type: 'text', text: 'v2 done' }],
+      },
+    }, called.state);
+    expect(completed.events).toMatchObject([
+      { type: 'item.completed', item: { kind: 'tool', id: 'call_v2', status: 'completed', output: 'v2 done' } },
+    ]);
   });
 
   it('a server-sent delta field wins over cursor diffing and keeps the cursor consistent', () => {
@@ -576,12 +652,12 @@ function isBareTool(frame: unknown): boolean {
 describe('OpencodeServerRunner v2 wiring (against the bundled mock server)', () => {
   const mockBin = join(FIXTURES, 'mock-opencode-serve.mjs');
 
-  it('emits v2 events through opts.onUiEvent while v1 events keep flowing; turn.completed comes from session.idle, not the HTTP response', async () => {
+  it('maps the v2 API event stream into both runner event protocols', async () => {
     const runner = new OpencodeServerRunner({ bin: mockBin, timeoutMs: 60_000 });
     const v1: AgentEvent[] = [];
     const v2: UiEvent[] = [];
     const session = runner.startSession(
-      { userPrompt: 'check the working tree', cwd: process.cwd() },
+      { userPrompt: 'check the working tree', cwd: process.cwd(), env: { MOCK_V2_EVENTS: '1' } },
       (e) => v1.push(e),
       { autoEndAfterFirstTurn: true, onUiEvent: (e) => v2.push(e) },
     );
@@ -603,17 +679,21 @@ describe('OpencodeServerRunner v2 wiring (against the bundled mock server)', () 
     expect(v2.filter((e) => e.type === 'session.started')).toHaveLength(1);
     expect(v2[1]).toEqual({ type: 'turn.started', turnId: 'turn_1' });
 
-    expect(v2).toContainEqual({ type: 'item.delta', itemId: 'prt_mock_t1', field: 'text', delta: 'Checking the working tree.' });
+    expect(v2).toContainEqual({
+      type: 'item.delta',
+      itemId: 'msg_mock_1_assistant:text:1',
+      field: 'text',
+      delta: 'Checking the working tree.',
+    });
     const pending = v2.find(
-      (e): e is Extract<UiEvent, { type: 'item.started' }> => e.type === 'item.started' && e.item.id === 'prt_mock_c1',
+      (e): e is Extract<UiEvent, { type: 'item.started' }> => e.type === 'item.started' && e.item.id === 'call_mock_1',
     );
     expect(pending?.item).toMatchObject({ kind: 'tool', name: 'bash', status: 'pending' });
     const cmdDone = v2.find(
-      (e): e is Extract<UiEvent, { type: 'item.completed' }> => e.type === 'item.completed' && e.item.id === 'prt_mock_c1',
+      (e): e is Extract<UiEvent, { type: 'item.completed' }> => e.type === 'item.completed' && e.item.id === 'call_mock_1',
     );
     expect(cmdDone?.item).toMatchObject({
       toolKind: 'execute',
-      title: 'git status --short',
       status: 'completed',
       output: ' M src/example.ts\n',
       exitCode: 0,
@@ -624,12 +704,9 @@ describe('OpencodeServerRunner v2 wiring (against the bundled mock server)', () 
       costUsd: 0.0021,
     });
 
-    // The ordering proof: the mock resolves the HTTP prompt response BEFORE
-    // streaming the final text part and session.idle, so a turn.completed taken
-    // from that response would land before the late "Done." delta. It must come
-    // from session.idle, i.e. after it. (v1's turn-end reads the same signal
-    // since #897; `opencode-server-runner.test.ts` pins that half.)
-    const lateDelta = v2.findIndex((e) => e.type === 'item.delta' && e.itemId === 'prt_mock_t2');
+    // The v2 prompt response is only an admission receipt; execution.succeeded
+    // closes the turn after the final text delta.
+    const lateDelta = v2.findIndex((e) => e.type === 'item.delta' && e.itemId === 'msg_mock_1_assistant:text:2');
     const turnDone = v2.findIndex((e) => e.type === 'turn.completed');
     expect(lateDelta).toBeGreaterThan(-1);
     expect(turnDone).toBeGreaterThan(lateDelta);

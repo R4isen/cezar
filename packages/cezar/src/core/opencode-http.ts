@@ -10,19 +10,13 @@ import {
  * The runner's door to a local `opencode serve`: one JSON request, and the SSE
  * subscription. Neither carries a client-side header or body timeout.
  *
- * Why not the global `fetch`. Node's `fetch` is undici, and undici applies a
- * `headersTimeout`/`bodyTimeout` default of 300_000 ms to every request. The
- * prompt POST is a long poll — opencode does not answer `POST
- * /session/:id/message` until the agent's turn is over, tools and all — so at
- * exactly 5:00 undici tore it down with `TypeError: fetch failed`, the runner
- * read that as the end of the turn, and the cockpit parked a run whose session
- * was still working (#897). Raising the limit means constructing an `undici`
- * Agent, i.e. a new runtime dependency of the published CLI for a request the
- * platform can already make; `node:http` has no such default and needs nothing.
+ * Why not the global `fetch`. The SSE subscription is long-lived; undici's
+ * default body timeout would drop a quiet event stream after 300 seconds,
+ * losing the execution terminal event the runner waits for. `node:http` has no
+ * such default and needs no additional runtime dependency.
  *
- * The SSE subscription goes through the same door on purpose: `bodyTimeout` is
- * an inactivity timer, so a quiet session would lose its event stream after the
- * same 300 s — and the turn boundary now depends on that stream.
+ * The v2 prompt endpoint returns an admission receipt; execution continues on
+ * this event stream.
  */
 
 /** A connection of our own, so a request never inherits `globalAgent`'s
@@ -38,6 +32,7 @@ export interface OpencodeResponse {
 
 export interface OpencodeRequestOptions {
   readonly method: string;
+  readonly authorization?: string;
   /** JSON body; the request is sent without one (and without a content-type)
    *  when this is `undefined`. */
   readonly body?: unknown;
@@ -77,6 +72,7 @@ export function opencodeRequest(url: string, opts: OpencodeRequestOptions): Prom
       headers['content-type'] = 'application/json';
       headers['content-length'] = String(Buffer.byteLength(payload));
     }
+    if (opts.authorization) headers.authorization = opts.authorization;
     const req = open(url, { method: opts.method, headers, agent: AGENT, signal: opts.signal });
     if (req instanceof Error) {
       reject(new OpencodeTransportError(req));
@@ -99,6 +95,7 @@ export function opencodeRequest(url: string, opts: OpencodeRequestOptions): Prom
 
 export interface OpencodeEventStreamOptions {
   readonly signal?: AbortSignal;
+  readonly authorization?: string;
   /** One `\n\n`-delimited SSE frame, without its terminating blank line. */
   readonly onFrame: (frame: string) => void;
   /** Called once when the stream is over — server gone, aborted, or the
@@ -127,7 +124,10 @@ export function openOpencodeEventStream(
     };
     const req = open(url, {
       method: 'GET',
-      headers: { accept: 'text/event-stream' },
+      headers: {
+        accept: 'text/event-stream',
+        ...(opts.authorization ? { authorization: opts.authorization } : {}),
+      },
       agent: AGENT,
       signal: opts.signal,
     });

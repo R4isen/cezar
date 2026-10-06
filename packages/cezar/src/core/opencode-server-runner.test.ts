@@ -209,7 +209,7 @@ describe('opencode serve startup', () => {
  * #897 — an OpenCode turn that runs longer than five minutes used to park the
  * run under "Needs you".
  *
- * `opencode` holds `POST /session/:id/message` open for the whole agent turn.
+ * Before the v2 API, OpenCode held `POST /session/:id/message` open for the whole agent turn.
  * Node's global `fetch` is undici, whose default `headersTimeout`/`bodyTimeout`
  * is 300_000 ms, so a turn still working at 5:00 lost its request with
  * `TypeError: fetch failed` — and `prompt()`'s `finally` emitted `turn-end`
@@ -320,6 +320,27 @@ describe('#897 a turn that outlives its prompt POST', () => {
     expect(types(events).indexOf('turn-end')).toBeGreaterThan(textIndex(events, 'Done.'));
     expect(result.text).toContain('Checking the working tree.');
     expect(result.text).toContain('Done.');
+  }, 30_000);
+
+  it('reports a v2 execution failure instead of completing an empty turn successfully', async () => {
+    const runner = new OpencodeServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      {
+        userPrompt: 'check configuration #execution-failed',
+        cwd: process.cwd(),
+        env: { MOCK_V2_EVENTS: '1' },
+      },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+
+    expect(events.find((event) => event.type === 'error')).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('mock provider unavailable'),
+    });
+    expect(events.filter((event) => event.type === 'turn-end')).toHaveLength(1);
   }, 30_000);
 
   it('the prompt POST does not go through global fetch, so undici\'s 300s default cannot reach it', async () => {

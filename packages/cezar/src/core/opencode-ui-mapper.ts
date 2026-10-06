@@ -1,11 +1,9 @@
 /**
  * Pure opencode SSE-bus → protocol-v2 mapper. `mapOpencodeEvent` folds one
  * parsed `{type, properties}` bus event into `UiEvent`s plus the next mapper
- * state; the runner calls it ALONGSIDE the v1 path (v1 events keep flowing
- * unchanged). v2 took its `turn.completed` from the wire `session.idle` from
- * the start, fixing gap §5.9; v1's `turn-end` used to be synthesized from the
- * prompt POST's HTTP response and now comes from the same `session.idle`,
- * because that response is neither a timely nor a reliable boundary (#897).
+ * state. OpenCode v2.0.24 `session.text/tool/step.*` and newer
+ * `session.next.*` events map to `UiEvent`s; execution terminal events close
+ * turns. Legacy message/part and `session.idle` remain supported too.
  *
  * Contract: `.ai/analysis/cockpit-ui-redesign/agent-event-protocols.md` §4
  * (wire format: Message/Part model, ToolState lifecycle) and §7.1
@@ -65,7 +63,7 @@ interface SubtaskScope {
 }
 
 export interface OpencodeUiMapperState {
-  /** The main session id (from POST /session) — the SSE bus is server-wide,
+  /** The main session id (from POST /api/session) — the SSE bus is server-wide,
    *  so this is what separates our events from a subtask's child session. */
   readonly sessionId: string | null;
   /** True once `opencodeSessionStarted` emitted `session.started`. */
@@ -101,6 +99,8 @@ export interface OpencodeUiMapperState {
   readonly usageByMessage: ReadonlyMap<string, MessageUsage>;
   /** Last emitted session totals — usage.updated fires only on change. */
   readonly lastUsage: { total: number; cost: number | null } | null;
+  readonly v2Texts: ReadonlyMap<string, { messageID: string; sessionID: string; field: 'text' | 'reasoning'; text: string }>;
+  readonly v2Tools: ReadonlyMap<string, { messageID: string; sessionID: string; name: string; input: unknown }>;
 }
 
 export interface OpencodeUiMapping {
@@ -126,12 +126,14 @@ export function createOpencodeUiState(): OpencodeUiMapperState {
     unboundSubtasks: [],
     usageByMessage: new Map(),
     lastUsage: null,
+    v2Texts: new Map(),
+    v2Tools: new Map(),
   };
 }
 
 /**
  * Opencode has no wire-level session-start event — the session is created by
- * the runner's `POST /session`, so the runner calls this once the response
+ * the runner's `POST /api/session`, so the runner calls this once the response
  * carries the id (like codex's out-of-band thread/start result).
  */
 export function opencodeSessionStarted(
@@ -148,8 +150,7 @@ export function opencodeSessionStarted(
 /**
  * Opencode has no wire-level turn-start either — the runner POSTing a prompt
  * IS the turn boundary, so the runner calls this on each prompt POST. The
- * matching `turn.completed` comes from the wire `session.idle` (never from
- * the HTTP prompt response — that is v1's known fidelity gap).
+ * matching `turn.completed` comes from the execution terminal event.
  */
 export function opencodeTurnStarted(state: OpencodeUiMapperState): OpencodeUiMapping {
   const turnId = `turn_${state.turnSeq + 1}`;
@@ -168,8 +169,42 @@ export function opencodeTurnStarted(state: OpencodeUiMapperState): OpencodeUiMap
 /** Fold one parsed SSE bus event into v2 events. Never throws. */
 export function mapOpencodeEvent(evt: unknown, state: OpencodeUiMapperState): OpencodeUiMapping {
   if (!isRecord(evt) || typeof evt.type !== 'string') return { events: [], state };
-  const props = isRecord(evt.properties) ? evt.properties : {};
-  switch (evt.type) {
+  const props = isRecord(evt.properties) ? evt.properties : isRecord(evt.data) ? evt.data : {};
+  if (evt.type.startsWith('session.next.') || isOpenCodeV2Event(evt.type)) {
+    return mapV2SessionEvent(evt, props, state);
+  }
+  if (evt.type === 'session.execution.succeeded') return mapTurnCompleted(props, state, 'end_turn');
+  if (evt.type === 'session.execution.interrupted') return mapTurnCompleted(props, state, 'cancelled');
+  if (evt.type === 'session.execution.failed') {
+    const failed = mapLegacyEvent('session.error', { sessionID: props.sessionID, error: props.error }, state);
+    const ended = mapTurnCompleted(props, failed.state, 'error');
+    return { events: [...failed.events, ...ended.events], state: ended.state };
+  }
+  return mapLegacyEvent(evt.type, props, state);
+}
+
+function isOpenCodeV2Event(type: string): boolean {
+  return [
+    'session.step.started',
+    'session.step.ended',
+    'session.step.failed',
+    'session.text.started',
+    'session.text.delta',
+    'session.text.ended',
+    'session.reasoning.started',
+    'session.reasoning.delta',
+    'session.reasoning.ended',
+    'session.tool.input.started',
+    'session.tool.input.delta',
+    'session.tool.input.ended',
+    'session.tool.called',
+    'session.tool.success',
+    'session.tool.failed',
+  ].includes(type);
+}
+
+function mapLegacyEvent(type: string, props: Record<string, unknown>, state: OpencodeUiMapperState): OpencodeUiMapping {
+  switch (type) {
     case 'message.updated':
     case 'message.created':
     case 'message.completed':
@@ -186,6 +221,139 @@ export function mapOpencodeEvent(evt: unknown, state: OpencodeUiMapperState): Op
       // permission.* (reserved for the permission.* events later), …
       return { events: [], state };
   }
+}
+
+function mapV2SessionEvent(
+  evt: Record<string, unknown>,
+  props: Record<string, unknown>,
+  state: OpencodeUiMapperState,
+): OpencodeUiMapping {
+  const originalType = str(evt.type) ?? '';
+  const type = originalType.startsWith('session.next.')
+    ? originalType
+    : originalType.replace(/^session\.(step|text|reasoning|tool)\./, 'session.next.$1.');
+  const sessionID = str(props.sessionID);
+  const messageID = str(props.assistantMessageID);
+
+  if (type === 'session.next.step.started' && sessionID && messageID) {
+    return mapLegacyEvent('message.updated', {
+      info: { id: messageID, sessionID, role: 'assistant' },
+    }, state);
+  }
+
+  if (type === 'session.next.step.ended' && sessionID && messageID) {
+    return mapLegacyEvent('message.part.updated', {
+      part: {
+        id: str(evt.id) ?? `${messageID}:step`,
+        messageID,
+        sessionID,
+        type: 'step-finish',
+        cost: props.cost,
+        tokens: props.tokens,
+      },
+    }, state);
+  }
+
+  if (type === 'session.next.step.failed' && sessionID) {
+    return mapLegacyEvent('session.error', { sessionID, error: props.error }, state);
+  }
+
+  const textEvent = type.startsWith('session.next.text.') || type.startsWith('session.next.reasoning.');
+  if (textEvent && sessionID && messageID) {
+    const reasoning = type.startsWith('session.next.reasoning.');
+    const field = reasoning ? 'reasoning' : 'text';
+    const ordinal = typeof props.ordinal === 'number' ? props.ordinal : undefined;
+    const textID = str(reasoning ? props.reasoningID : props.textID)
+      ?? (ordinal === undefined || messageID === undefined ? undefined : `${messageID}:${field}:${ordinal}`);
+    if (!textID) return { events: [], state };
+    const previous = state.v2Texts.get(textID);
+    const current = previous?.text ?? '';
+    let full = current;
+    let delta: string | undefined;
+    if (type.endsWith('.delta')) {
+      delta = str(props.delta) ?? '';
+      full += delta;
+    } else if (type.endsWith('.ended')) {
+      full = str(props.text) ?? current;
+      if (full.length > current.length) delta = full.slice(current.length);
+    }
+
+    const message = mapLegacyEvent('message.updated', {
+      info: { id: messageID, sessionID, role: 'assistant' },
+    }, state);
+    const part = mapLegacyEvent('message.part.updated', {
+      part: {
+        id: textID,
+        messageID,
+        sessionID,
+        type: field,
+        text: full,
+        ...(type.endsWith('.ended') ? { time: { start: 0, end: Date.now() } } : {}),
+      },
+      ...(delta !== undefined ? { delta } : {}),
+    }, message.state);
+    const v2Texts = new Map(part.state.v2Texts);
+    if (type.endsWith('.ended')) v2Texts.delete(textID);
+    else v2Texts.set(textID, { messageID, sessionID, field, text: full });
+    return { events: [...message.events, ...part.events], state: { ...part.state, v2Texts } };
+  }
+
+  if (type === 'session.next.tool.input.started' && sessionID && messageID) {
+    const callID = str(props.callID) ?? str(props.id);
+    const name = str(props.name);
+    if (!callID || !name) return { events: [], state };
+    const v2Tools = new Map(state.v2Tools);
+    v2Tools.set(callID, { messageID, sessionID, name, input: {} });
+    const mapped = mapLegacyEvent('message.part.updated', {
+      part: { id: callID, callID, messageID, sessionID, type: 'tool', tool: name, state: { status: 'pending', input: {} } },
+    }, state);
+    return { events: mapped.events, state: { ...mapped.state, v2Tools } };
+  }
+
+  if (type === 'session.next.tool.called' && sessionID && messageID) {
+    const callID = str(props.callID) ?? str(props.id);
+    const name = str(props.tool) ?? str(props.name);
+    if (!callID || !name) return { events: [], state };
+    const input = isRecord(props.input) ? props.input : {};
+    const v2Tools = new Map(state.v2Tools);
+    v2Tools.set(callID, { messageID, sessionID, name, input });
+    const mapped = mapLegacyEvent('message.part.updated', {
+      part: { id: callID, callID, messageID, sessionID, type: 'tool', tool: name, state: { status: 'running', input } },
+    }, state);
+    return { events: mapped.events, state: { ...mapped.state, v2Tools } };
+  }
+
+  if ((type === 'session.next.tool.success' || type === 'session.next.tool.failed') && sessionID && messageID) {
+    const callID = str(props.callID) ?? str(props.id);
+    if (!callID) return { events: [], state };
+    const prior = state.v2Tools.get(callID);
+    const name = str(props.tool) ?? str(props.name) ?? prior?.name ?? 'tool';
+    const content = Array.isArray(props.content)
+      ? props.content.map((item) => isRecord(item) && typeof item.text === 'string' ? item.text : '').filter(Boolean).join('\n')
+      : undefined;
+    const outputValue = str(props.result) ?? content ?? (isRecord(props.structured) ? JSON.stringify(props.structured) : undefined);
+    const failed = type.endsWith('.failed');
+    const mapped = mapLegacyEvent('message.part.updated', {
+      part: {
+        id: callID,
+        callID,
+        messageID,
+        sessionID,
+        type: 'tool',
+        tool: name,
+        state: {
+          status: failed ? 'error' : 'completed',
+          input: prior?.input,
+          ...(failed ? { error: props.error } : { output: outputValue, metadata: props.structured ?? props.metadata }),
+        },
+      },
+    }, state);
+    const v2Tools = new Map(mapped.state.v2Tools);
+    v2Tools.delete(callID);
+    return { events: mapped.events, state: { ...mapped.state, v2Tools } };
+  }
+
+  return { events: [], state };
 }
 
 // ---- message info → roles + usage.updated -----------------------------------
@@ -374,7 +542,7 @@ function mapTool(
     if (error !== undefined) item.error = error;
   }
   const metadata = isRecord(toolState.metadata) ? toolState.metadata : undefined;
-  const exitCode = metadata ? num(metadata.exit) : undefined;
+  const exitCode = metadata ? num(metadata.exit) ?? num(metadata.exitCode) : undefined;
   if (exitCode !== undefined) item.exitCode = exitCode;
   if (parentItemId !== undefined) item.parentItemId = parentItemId;
 
@@ -575,6 +743,14 @@ function mapStepFinish(
  *  closes the current turn; a foreign idle is the subtask's child session
  *  going quiet → the subtask item completes. */
 function mapIdle(props: Record<string, unknown>, state: OpencodeUiMapperState): OpencodeUiMapping {
+  return mapTurnCompleted(props, state, state.turnErrored ? 'error' : 'end_turn');
+}
+
+function mapTurnCompleted(
+  props: Record<string, unknown>,
+  state: OpencodeUiMapperState,
+  stopReason: 'end_turn' | 'cancelled' | 'error',
+): OpencodeUiMapping {
   const sid = str(props.sessionID);
   const isMain = sid === undefined || state.sessionId === null || sid === state.sessionId;
   if (!isMain) {
@@ -594,7 +770,7 @@ function mapIdle(props: Record<string, unknown>, state: OpencodeUiMapperState): 
   const completed: Extract<UiEvent, { type: 'turn.completed' }> = {
     type: 'turn.completed',
     turnId: state.currentTurnId,
-    stopReason: state.turnErrored ? 'error' : 'end_turn',
+    stopReason,
   };
   const turnUsage = usageForMessages(state.currentTurnMessageIds, state.usageByMessage);
   if (turnUsage.usage !== null) completed.usage = turnUsage.usage;

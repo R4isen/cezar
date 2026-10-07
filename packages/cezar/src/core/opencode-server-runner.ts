@@ -179,6 +179,12 @@ class OpencodeSession implements AgentSession {
           ...spec.env,
           OPENCODE_SERVER_USERNAME: 'opencode',
           OPENCODE_SERVER_PASSWORD: password,
+          // `external_directory` defaults to "ask" (OpenCode permissions), and nothing here ever
+          // answers a permission prompt — a tool touching a path outside `cwd` (the handoff file,
+          // `additionalDirectories` grants on other backends) hangs the session forever with no
+          // error. Inline config merges on top of the user's own, so this never weakens an
+          // explicit "deny" they configured — it only fixes the unattended default.
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { external_directory: 'allow' } }),
         },
       });
       // Private MCP servers (spec 2026-10-07-private-project-mcp): OpenCode loads

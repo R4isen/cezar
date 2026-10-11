@@ -22,6 +22,8 @@ The sidebar ⭐ chip shows cezar's real GitHub star count, refreshed every 10 se
 
 ## Progress
 
+PR: #1379
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Server refresh cadence

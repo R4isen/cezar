@@ -14,9 +14,9 @@ import { z } from 'zod';
  * server already owns.
  *
  * Failure is not exceptional here, it is the common case — offline, rate-limited (60/h per IP
- * unauthenticated, 5000/h with `GITHUB_TOKEN`), behind a proxy, `CEZ_NO_BANNER=1`. Every one of them answers
- * `{ available: false }` the way `server/github.ts` does, never an error and never a throw: a
- * promo that can break a cockpit is worse than a promo nobody sees.
+ * unauthenticated, 5000/h with `GITHUB_TOKEN`), behind a proxy, `CEZ_NO_BANNER=1`. Every one of
+ * them answers `{ available: false }` the way `server/github.ts` does, never an error and never
+ * a throw: a promo that can break a cockpit is worse than a promo nobody sees.
  *
  * Two caches, both cheap: in memory for the life of the process, and a single small JSON file
  * under `~/.cache/cez/` so a restart (the desktop shell restarts often) paints the count

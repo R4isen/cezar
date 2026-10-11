@@ -26,12 +26,12 @@ The sidebar ⭐ chip shows cezar's real GitHub star count, refreshed every 10 se
 
 ### Phase 1: Server refresh cadence
 
-- [ ] 1.1 Shorten the TTL, add token auth and rate-limit pacing to the star-count reader, with tests
+- [x] 1.1 Shorten the TTL, add token auth and rate-limit pacing to the star-count reader, with tests — 0c90bcd2
 
 ### Phase 2: Cockpit poll
 
-- [ ] 2.1 Poll `useStarCount` every 10 seconds, with a test
+- [x] 2.1 Poll `useStarCount` every 10 seconds, with a test — a955d76f
 
 ### Phase 3: Docs
 
-- [ ] 3.1 Update the star-count cadence in AGENTS.md, BACKWARD_COMPATIBILITY.md, docs/reference.md and .env.example
+- [x] 3.1 Update the star-count cadence in AGENTS.md, BACKWARD_COMPATIBILITY.md, docs/reference.md and .env.example — bceb57d6

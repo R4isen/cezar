@@ -1449,20 +1449,22 @@ export function useAgentProfiles() {
   })
 }
 
+/** The chip's refresh cadence — matches the server's `STAR_CACHE_TTL_MS`, which also paces
+ *  itself to GitHub's rate limit, so a poll never costs more than one cached read. */
+export const STAR_COUNT_REFRESH_MS = 10_000
+
 /**
- * cezar's own star count, for the sidebar's ⭐ ask.
- *
- * `staleTime: Infinity` and no retry, both deliberate. The server already caches the number for
- * six hours and answers `{ available: false }` for every failure, so refetching it costs a round
- * trip that cannot produce a different answer — and a decorative count is the last thing in the
- * cockpit that should retry, poll, or hold the query client's attention. One read per session.
+ * cezar's own star count, for the sidebar's ⭐ ask — refreshed every ten seconds while the tab is
+ * visible (TanStack pauses `refetchInterval` in the background). No retry: the server answers
+ * `{ available: false }` for every failure, and the next tick is the retry.
  */
 export function useStarCount(enabled = true) {
   return useQuery({
     queryKey: workspaceQueryKeys.starCount,
     queryFn: ({ signal }) => getStarCount({ signal }),
     enabled,
-    staleTime: Infinity,
+    staleTime: STAR_COUNT_REFRESH_MS,
+    refetchInterval: STAR_COUNT_REFRESH_MS,
     retry: false,
     refetchOnMount: false,
   })

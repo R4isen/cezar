@@ -174,8 +174,10 @@ describe('opencode serve startup', () => {
 
   it.each([0, 0.5, 0.99999])('passes a random port in 40000–59999 and exposes the PID synchronously (random=%s)', (random) => {
     let argv: unknown;
-    spawnHook.override = (_bin, args) => {
+    let env: NodeJS.ProcessEnv | undefined;
+    spawnHook.override = (_bin, args, options) => {
       argv = args;
+      env = (options as { env?: NodeJS.ProcessEnv }).env;
       return silentChild();
     };
     vi.useFakeTimers();
@@ -189,6 +191,10 @@ describe('opencode serve startup', () => {
       expect(port).toBeGreaterThanOrEqual(40000);
       expect(port).toBeLessThan(60000);
       expect(session.pid).toBe(5151);
+      expect(JSON.parse(env?.OPENCODE_CONFIG_CONTENT ?? '{}')).toEqual({
+        permission: { external_directory: 'allow' },
+        tools: { question: false },
+      });
     } finally {
       randomSpy.mockRestore();
     }

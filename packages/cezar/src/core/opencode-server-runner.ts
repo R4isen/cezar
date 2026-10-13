@@ -180,7 +180,10 @@ class OpencodeSession implements AgentSession {
           // `additionalDirectories` grants on other backends) hangs the session forever with no
           // error. Inline config merges on top of the user's own, so this never weakens an
           // explicit "deny" they configured — it only fixes the unattended default.
-          OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { external_directory: 'allow' } }),
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            permission: { external_directory: 'allow' },
+            tools: { question: false },
+          }),
         },
       });
       // Private MCP servers (spec 2026-10-07-private-project-mcp): OpenCode loads

@@ -40,14 +40,15 @@ export interface OpencodeRunnerOptions {
 }
 
 const SERVER_START_TIMEOUT_MS = 30_000;
+const STDERR_TAIL_CHARS = 4_000;
 
 /** Grace between the teardown SIGTERM and the SIGKILL that follows it. */
 export const KILL_GRACE_MS = 4_000;
 
 /**
- * How long to wait for an execution start after a prompt is admitted when the
- * event stream has gone quiet. Once v2 execution starts, the runner waits for
- * its terminal event or the independent agent-step deadline (#880).
+ * How long to wait for execution activity after a prompt is admitted when the
+ * event stream has gone quiet. An execution-start or tool-call event keeps the
+ * turn open until its terminal event or the independent agent-step deadline (#880).
  */
 export const TURN_IDLE_GRACE_MS = 5_000;
 
@@ -168,8 +169,6 @@ class OpencodeSession implements AgentSession {
     private readonly onEvent: ((event: AgentEvent) => void) | undefined,
     private readonly opts: SessionOptions,
   ) {
-    // Random high port; the actual bound URL is read back from stdout.
-    const port = 40000 + Math.floor(Math.random() * 20000);
     const password = randomBytes(32).toString('base64url');
     this.authorization = `Basic ${Buffer.from(`opencode:${password}`, 'utf8').toString('base64')}`;
     try {
@@ -195,7 +194,9 @@ class OpencodeSession implements AgentSession {
       if (spec.mcpServers?.length) {
         env.OPENCODE_CONFIG_CONTENT = opencodeConfigContent(spec.mcpServers, env.OPENCODE_CONFIG_CONTENT);
       }
-      const [file, argv] = disclaimedCommand(bin, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], env);
+      // Port 0: the OS assigns a free port and the bound URL is read back from stdout. A
+      // random pick from 40000–59999 overlapped Linux's ephemeral range and collided.
+      const [file, argv] = disclaimedCommand(bin, ['serve', '--hostname', '127.0.0.1', '--port', '0'], env);
       this.child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
     } catch (err) {
       throw wrapSpawnError(err, bin);
@@ -220,12 +221,14 @@ class OpencodeSession implements AgentSession {
       this.resolveExit();
     });
 
-    const stderrChunks: string[] = [];
+    let stderrTail = '';
     this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (chunk: string) => stderrChunks.push(chunk));
+    this.child.stderr.on('data', (chunk: string) => {
+      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
+    });
 
     // The server prints its URL on stdout once listening.
-    const urlReady = this.waitForServerUrl();
+    const urlReady = this.waitForServerUrl(() => stderrTail);
 
     const limitMs = spec.timeoutMs ?? timeoutMs;
     let deadline: NodeJS.Timeout | undefined;
@@ -360,7 +363,7 @@ class OpencodeSession implements AgentSession {
 
   // ---- server lifecycle ---------------------------------------------------
 
-  private waitForServerUrl(): Promise<string> {
+  private waitForServerUrl(stderr: () => string): Promise<string> {
     return new Promise((resolve, reject) => {
       let buffer = '';
       const timer = setTimeout(() => {
@@ -378,7 +381,11 @@ class OpencodeSession implements AgentSession {
       };
       const onExit = () => {
         cleanup();
-        reject(new Error('opencode serve exited before it started listening'));
+        // `exit` can fire before the last stderr chunk is read; give it one tick.
+        setImmediate(() => {
+          const detail = startupFailureDetail(stderr());
+          reject(new Error(`opencode serve exited before it started listening${detail ? `: ${detail}` : ''}`));
+        });
       };
       const cleanup = () => {
         clearTimeout(timer);
@@ -571,11 +578,7 @@ class OpencodeSession implements AgentSession {
     const props = evt.properties ?? evt.data ?? {};
     const sessionID = stringField(props, 'sessionID');
     if (type === 'session.execution.started') {
-      if (sessionID === undefined || sessionID === this.sessionId) {
-        this.executionStarted = true;
-        if (this.turnGraceTimer) clearTimeout(this.turnGraceTimer);
-        this.turnGraceTimer = undefined;
-      }
+      this.markExecutionStarted(sessionID);
     } else if (
       type === 'session.execution.succeeded'
       || type === 'session.execution.failed'
@@ -595,6 +598,7 @@ class OpencodeSession implements AgentSession {
       const text = stringField(props, 'text');
       if (id && text !== undefined) this.textCoalescer.complete(id, text);
     } else if (type === 'session.tool.called' || type === 'session.next.tool.called') {
+      this.markExecutionStarted(sessionID);
       const callId = stringField(props, 'callID') ?? stringField(props, 'id');
       const name = stringField(props, 'tool') ?? stringField(props, 'name');
       if (callId && name && !this.toolsSeen.has(callId)) {
@@ -678,6 +682,13 @@ class OpencodeSession implements AgentSession {
         response: reply,
       }).catch(() => undefined);
     }
+  }
+
+  private markExecutionStarted(sessionID: string | undefined): void {
+    if (!this.turnInFlight || (sessionID !== undefined && sessionID !== this.sessionId)) return;
+    this.executionStarted = true;
+    if (this.turnGraceTimer) clearTimeout(this.turnGraceTimer);
+    this.turnGraceTimer = undefined;
   }
 
   private handlePart(part: Record<string, unknown>): void {
@@ -801,6 +812,18 @@ interface OpencodeEvent {
   type?: string;
   properties?: Record<string, unknown>;
   data?: Record<string, unknown>;
+}
+
+/** The most specific line of a crash on stderr — the innermost `Error:` cause, else the last
+ *  non-stack line — so a failed boot says why instead of just "exited". */
+function startupFailureDetail(stderr: string): string {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('at ') && line !== '}' && line !== '{');
+  const errorLine = [...lines].reverse().find((line) => /\b\w*Error: \S/.test(line));
+  const picked = (errorLine ?? lines.at(-1) ?? '').replace(/^\[cause\]:\s*/, '');
+  return picked.length > 300 ? `${picked.slice(0, 300)}…` : picked;
 }
 
 function textOf(content: ContentBlock[]): string {

@@ -209,9 +209,11 @@ const server = createServer((req, res) => {
         ? 'drop-then-die'
         : promptText.includes('#drop-post')
           ? 'drop-post'
-          : promptText.includes('#no-idle')
-            ? 'no-idle'
-            : 'default';
+          : promptText.includes('#tool-before-idle')
+            ? 'tool-before-idle'
+            : promptText.includes('#no-idle')
+              ? 'no-idle'
+              : 'default';
 
       const asked = promptText.match(/#permission (\S+)/);
       if (asked) {
@@ -238,6 +240,21 @@ const server = createServer((req, res) => {
           },
         });
         res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ data: { id: messageId(), sessionID: SESSION_ID, type: 'user', payload: { text: promptText }, delivery: 'steer' } }));
+        if (script === 'tool-before-idle') {
+          const delay = Number(process.env.MOCK_TOOL_IDLE_DELAY_MS ?? '5100');
+          setTimeout(() => send({
+            type: 'session.tool.called',
+            properties: { sessionID: SESSION_ID, callID: 'call_mock_1', tool: 'bash', input: { command: 'long-running task' } },
+          }), 20);
+          setTimeout(() => send({
+            type: 'session.tool.called',
+            properties: { sessionID: SESSION_ID, callID: 'call_mock_2', tool: 'bash', input: { command: 'follow-up task' } },
+          }), delay);
+          setTimeout(() => send({ type: 'session.idle', properties: { sessionID: SESSION_ID } }), delay + 50);
+          return;
+        }
+        setTimeout(() => sendV2Turn(promptText.includes('#execution-failed')), 20);
         res.end(JSON.stringify({ info: info({}), parts: [] }));
         return;
       }

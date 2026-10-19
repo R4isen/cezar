@@ -172,7 +172,7 @@ describe('opencode serve startup', () => {
     spawnHook.override = null;
   });
 
-  it.each([0, 0.5, 0.99999])('passes a random port in 40000–59999 and exposes the PID synchronously (random=%s)', (random) => {
+  it('lets the OS assign the port and exposes the PID synchronously', () => {
     let argv: unknown;
     let env: NodeJS.ProcessEnv | undefined;
     spawnHook.override = (_bin, args, options) => {
@@ -181,23 +181,38 @@ describe('opencode serve startup', () => {
       return silentChild();
     };
     vi.useFakeTimers();
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(random);
-    try {
-      const session = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 0 }).startSession({ userPrompt: 'do it', cwd: process.cwd() });
-      void session.result.catch(() => undefined);
-      const port = 40000 + Math.floor(random * 20000);
-      expect(argv).toEqual(['serve', '--hostname', '127.0.0.1', '--port', String(port)]);
-      expect(Number.isInteger(port)).toBe(true);
-      expect(port).toBeGreaterThanOrEqual(40000);
-      expect(port).toBeLessThan(60000);
-      expect(session.pid).toBe(5151);
-      expect(JSON.parse(env?.OPENCODE_CONFIG_CONTENT ?? '{}')).toEqual({
-        permission: { external_directory: 'allow' },
-        tools: { question: false },
-      });
-    } finally {
-      randomSpy.mockRestore();
-    }
+    const session = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 0 }).startSession({ userPrompt: 'do it', cwd: process.cwd() });
+    void session.result.catch(() => undefined);
+    // A random fixed port collided with Linux's ephemeral range ("Is port 47002 in use?").
+    expect(argv).toEqual(['serve', '--hostname', '127.0.0.1', '--port', '0']);
+    expect(session.pid).toBe(5151);
+    expect(JSON.parse(env?.OPENCODE_CONFIG_CONTENT ?? '{}')).toEqual({
+      permission: { external_directory: 'allow' },
+      tools: { question: false },
+    });
+  });
+
+  it('reports the server stderr cause when it exits before listening', async () => {
+    const child = silentChild();
+    spawnHook.override = () => child;
+    const events: AgentEvent[] = [];
+    const session = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 0 }).startSession(
+      { userPrompt: 'do it', cwd: process.cwd() },
+      (event) => events.push(event),
+    );
+    void session.result.catch(() => undefined);
+    child.stderr.write(
+      'ServeError: \n    at f (/$bunfs/root/chunk.js:54:51704)\n  [cause]: Error: Failed to start server. Is port 47002 in use?\n      at serve (unknown)\n}\n',
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    Object.assign(child, { exitCode: 1 });
+    child.emit('exit', 1, null);
+    await vi.waitFor(() =>
+      expect(events).toContainEqual({
+        type: 'error',
+        message: 'opencode: opencode serve exited before it started listening: Error: Failed to start server. Is port 47002 in use?',
+      }),
+    );
   });
 
   it('fails the session when the server never reports a listening URL', async () => {
@@ -382,6 +397,28 @@ describe('#897 a turn that outlives its prompt POST', () => {
     expect(types(events).filter((t) => t === 'turn-end')).toHaveLength(1);
     expect(notes(events)).toEqual([]);
     expect(Date.now() - started).toBeGreaterThanOrEqual(TURN_IDLE_GRACE_MS);
+  }, 30_000);
+
+  it('tool activity prevents the grace fallback from ending a still-running turn', async () => {
+    const runner = new OpencodeServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const { events, onEvent } = record();
+    const session = runner.startSession(
+      {
+        userPrompt: 'run the long task #tool-before-idle',
+        cwd: process.cwd(),
+        env: {
+          MOCK_V2_EVENTS: '1',
+          MOCK_TOOL_IDLE_DELAY_MS: String(TURN_IDLE_GRACE_MS + 100),
+        },
+      },
+      onEvent,
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+
+    const toolCalls = events.filter((event) => event.type === 'tool-call');
+    expect(toolCalls, types(events).join(',')).toHaveLength(2);
+    expect(types(events).lastIndexOf('turn-end')).toBeGreaterThan(events.indexOf(toolCalls[1]!));
   }, 30_000);
 
   it('a POST that drops on a session that then DIES is still reported', async () => {

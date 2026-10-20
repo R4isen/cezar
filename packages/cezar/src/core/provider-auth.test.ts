@@ -414,6 +414,23 @@ describe('provider auth parsers', () => {
     await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'connected' } });
   });
 
+  it('recognizes an OpenCode 2.x table mixing stored and environment rows as connected', async () => {
+    const service = new ProviderAuthService({
+      runCommand: runner((executable) => executable === 'opencode'
+        ? {
+          stdout: [
+            'Anthropic       ANTHROPIC_API_KEY           environment',
+            'GitHub Copilot  GitHub Copilot              stored',
+          ].join('\n'),
+          stderr: '',
+          exitCode: 0,
+        }
+        : { stdout: 'unrecognized', stderr: '', exitCode: 0 }),
+    });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'connected' } });
+  });
+
   it('recognizes an OpenCode 2.x successful empty list as disconnected', async () => {
     const service = new ProviderAuthService({
       runCommand: runner((executable) => executable === 'opencode'

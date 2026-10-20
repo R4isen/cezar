@@ -429,6 +429,7 @@ const DESCRIPTORS: readonly ProviderDescriptor[] = [
   },
   {
     id: 'grok',
+    overrideEnv: 'CEZ_GROK_BIN',
     executable: () => process.env.CEZ_GROK_BIN ?? 'grok',
     statusArgs: ['models'],
     loginArgs: ['login'],

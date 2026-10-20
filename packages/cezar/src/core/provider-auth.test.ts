@@ -718,6 +718,23 @@ describe('Grok `grok models` probe', () => {
     });
     await expect(statuses(service)).resolves.toMatchObject({ grok: { status: 'disconnected' } });
   });
+
+  it('identifies CEZ_GROK_BIN as the source of an inconclusive probe', async () => {
+    process.env.CEZ_GROK_BIN = '/tools/grok custom';
+    const onInconclusive = vi.fn();
+    const service = new ProviderAuthService({
+      runCommand: runner((executable) => executable === '/tools/grok custom'
+        ? { stdout: 'unrecognized', stderr: '', exitCode: 0 }
+        : resultFor(executable)),
+      onInconclusive,
+    });
+
+    await expect(statuses(service)).resolves.toMatchObject({ grok: { status: 'unknown' } });
+    expect(onInconclusive).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'grok',
+      binSource: 'override',
+    }));
+  });
 });
 
 describe('ProviderAuthService', () => {

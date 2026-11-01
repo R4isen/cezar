@@ -58,10 +58,15 @@ export const PROFILE_ENV_VAR: Record<ProviderId, string | null> = {
   claude: 'CLAUDE_CONFIG_DIR',
   codex: 'CODEX_HOME',
   opencode: null,
+  // OpenCode 2.x keeps credentials in the same SQLite DB. A config-dir profile would not isolate it.
+  opencode2: null,
   cursor: null,
   pi: null,
   junie: null,
   copilot: null,
+  // The CLI documents no home variable; its state is `~/.gemini/antigravity-cli`, relocated only
+  // by moving `HOME` itself, which would also move every tool the agent's Bash calls touch.
+  antigravity: null,
   grok: null,
 };
 
@@ -113,14 +118,16 @@ const PROFILE_DIR_MARKERS: Record<ProviderId, readonly string[]> = {
   claude: ['.claude.json', 'settings.json', 'projects', 'sessions'],
   codex: ['auth.json', 'config.toml'],
   opencode: [],
+  opencode2: [],
   cursor: ['cli-config.json'],
   // pi cannot carry profiles (`PROFILE_ENV_VAR.pi === null`), so nothing ever probes a pi
   // profile dir; the entry exists to keep this table exhaustive over `ProviderId`.
   pi: [],
   // junie cannot carry profiles either (`PROFILE_ENV_VAR.junie === null`) — same reason.
   junie: [],
-  // Same for copilot (`PROFILE_ENV_VAR.copilot === null`).
+  // Same for copilot (`PROFILE_ENV_VAR.copilot === null`) and antigravity.
   copilot: [],
+  antigravity: [],
   // Same for grok (`PROFILE_ENV_VAR.grok === null`) — see the 2026-10-04 `GROK_HOME` probe above.
   grok: [],
 };

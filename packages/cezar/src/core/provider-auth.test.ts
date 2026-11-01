@@ -1,3 +1,5 @@
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -16,7 +18,8 @@ vi.mock('./claude-bin.ts', async (importOriginal) => ({
   resolveClaudeBin: (env: NodeJS.ProcessEnv = process.env) => env.CEZ_CLAUDE_BIN || 'claude',
 }));
 // Same reason for Cursor: `cursor-bin.test.ts` covers the real PATH resolution.
-vi.mock('./cursor-bin.ts', () => ({
+vi.mock('./cursor-bin.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./cursor-bin.ts')>(),
   resolveCursorAgentBin: () => process.env.CEZ_CURSOR_AGENT_BIN || 'agent',
 }));
 vi.mock('./junie-auth-probe.ts', () => ({
@@ -27,7 +30,11 @@ import { PROVIDER_IDS } from './provider-auth.ts';
 import {
   ProviderAuthService,
   cliVersionFrom,
+  copilotAcpAnswered,
+  defaultRunProviderCommand,
+  isDefinitiveProviderAuthFailure,
   isRuntimeProviderAuthFailure,
+  probeCwdFallback,
   providerAuthChecksDisabled,
   versionManagerShimMiss,
   type ProviderCommandResult,
@@ -70,6 +77,12 @@ const connectedResults: Record<string, ProviderCommandResult> = {
     stderr: '',
     exitCode: 0,
   },
+  // `agy models` lists the signed-in account's models and exits 0 (live agy 1.4.0 output).
+  antigravity: {
+    stdout: 'Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\n',
+    stderr: '',
+    exitCode: 0,
+  },
   // `grok models` exits 0 either way (grok 1.0.46). "logged in" is the connected sentence.
   grok: {
     stdout: 'You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n',
@@ -79,26 +92,32 @@ const connectedResults: Record<string, ProviderCommandResult> = {
 };
 
 const originalEnv = {
+  CEZ_AGY_BIN: process.env.CEZ_AGY_BIN,
   CEZ_AGENT_MODELS_LOCKED: process.env.CEZ_AGENT_MODELS_LOCKED,
   CEZ_DRY_RUN: process.env.CEZ_DRY_RUN,
   CEZ_CLAUDE_BIN: process.env.CEZ_CLAUDE_BIN,
   CEZ_CODEX_BIN: process.env.CEZ_CODEX_BIN,
   CEZ_OPENCODE_BIN: process.env.CEZ_OPENCODE_BIN,
+  CEZ_OPENCODE2_BIN: process.env.CEZ_OPENCODE2_BIN,
   CEZ_PI_BIN: process.env.CEZ_PI_BIN,
   CURSOR_API_KEY: process.env.CURSOR_API_KEY,
   CEZ_COPILOT_BIN: process.env.CEZ_COPILOT_BIN,
+  CEZ_CURSOR_AGENT_BIN: process.env.CEZ_CURSOR_AGENT_BIN,
   CEZ_GROK_BIN: process.env.CEZ_GROK_BIN,
 };
 
 beforeEach(() => {
+  delete process.env.CEZ_AGY_BIN;
   delete process.env.CEZ_AGENT_MODELS_LOCKED;
   delete process.env.CEZ_DRY_RUN;
   delete process.env.CEZ_CLAUDE_BIN;
   delete process.env.CEZ_CODEX_BIN;
   delete process.env.CEZ_OPENCODE_BIN;
+  delete process.env.CEZ_OPENCODE2_BIN;
   delete process.env.CEZ_PI_BIN;
   delete process.env.CURSOR_API_KEY;
   delete process.env.CEZ_COPILOT_BIN;
+  delete process.env.CEZ_CURSOR_AGENT_BIN;
   delete process.env.CEZ_GROK_BIN;
 });
 
@@ -121,6 +140,7 @@ function resultFor(executable: string): ProviderCommandResult {
   if (executable === 'agent' || executable.includes('cursor')) return connectedResults.cursor!;
   if (executable.includes('opencode')) return connectedResults.opencode!;
   if (executable.includes('copilot')) return connectedResults.copilot!;
+  if (executable === 'agy') return connectedResults.antigravity!;
   if (executable.includes('grok')) return connectedResults.grok!;
   return connectedResults.pi!;
 }
@@ -168,6 +188,42 @@ describe('runtime provider authentication failures', () => {
     'network connection reset',
   ])('does not turn unrelated failures into credential failures: %s', (message) => {
     expect(isRuntimeProviderAuthFailure(message)).toBe(false);
+  });
+
+  // Only a verdict a local status probe cannot contradict is definitive (telemetry 9e4a95db).
+  it.each([
+    ['claude: Failed to authenticate: OAuth session expired and could not be refreshed', true],
+    ['OAuth refresh token is no longer valid; run /login to re-authenticate', true],
+    ['Failed to authenticate. API Error: 401 OAuth access token has been revoked.', false],
+    ['Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.', false],
+    ['OAuth access token could not be refreshed: another Claude Code process is holding the refresh lock', false],
+  ])('classifies %s as definitive: %s', (message, definitive) => {
+    expect(isDefinitiveProviderAuthFailure(message)).toBe(definitive);
+  });
+
+  // The real telemetry messages (spec 2026-10-24 item 2), as the runners emit them.
+  it.each([
+    ['bca23063', 'Not logged in · Please run /login', false],
+    ['1e673dee', "cursor agent exited with code 1 — Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.", false],
+    ['e41761a1', 'Upstream request failed: Invalid credential', false],
+    ['75ae746c', 'Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access', true],
+    ['c65a5ac5', 'API Error: 400 Identity verification is required to continue.', true],
+  ])('latches the vendor auth failure from %s', (_group, message, definitive) => {
+    expect(isRuntimeProviderAuthFailure(message)).toBe(true);
+    expect(isDefinitiveProviderAuthFailure(message)).toBe(definitive);
+  });
+
+  it.each([
+    'add a test for the not-logged-in banner',
+    'show the not logged in banner when the session expires',
+    'the page says Not logged in until the user clicks Sign in',
+    'Authentication required for the /admin route — added middleware',
+    'handle invalid credentials gracefully in the login form',
+    'returns 403 when credentials are invalid for the admin route',
+    'documented that identity verification is required for payouts',
+  ])('does not latch on agent prose about logins: %s', (message) => {
+    expect(isRuntimeProviderAuthFailure(message)).toBe(false);
+    expect(isDefinitiveProviderAuthFailure(message)).toBe(false);
   });
 });
 
@@ -252,6 +308,27 @@ describe('provider auth parsers', () => {
     await expect(statuses(service)).resolves.toMatchObject({ codex: { status: 'connected' } });
   });
 
+  it.each([
+    ['stdout', '***'],
+    ['stdout', 'sk-proj-***ABCDE'],
+    ['stderr', '***'],
+    ['stderr', 'sk-proj-***ABCDE'],
+  ])('recognizes Codex 0.164 configured API key on %s (%s)', async (channel, masked) => {
+    const output = `\u001B[32mAPI key configured - ${masked}\u001B[0m\nAuthentication is checked when you send a request.\n`;
+    const service = new ProviderAuthService({
+      runCommand: runner((executable) => executable.includes('codex')
+        ? { stdout: channel === 'stdout' ? output : '', stderr: channel === 'stderr' ? output : '', exitCode: 0 }
+        : resultFor(executable)),
+    });
+
+    const response = await service.status();
+    expect(response.providers.find(({ provider }) => provider === 'codex')).toEqual({
+      provider: 'codex',
+      status: 'connected',
+    });
+    expect(JSON.stringify(response)).not.toContain(masked);
+  });
+
   it('recognizes current Codex not-logged-in stderr on exit 1', async () => {
     const service = new ProviderAuthService({
       runCommand: runner((executable) => executable.includes('codex')
@@ -275,6 +352,11 @@ describe('provider auth parsers', () => {
     {
       case: 'conflicting answers',
       stdout: 'Logged in using ChatGPT',
+      stderr: 'Not logged in',
+    },
+    {
+      case: 'conflicting configured API key answers',
+      stdout: 'API key configured - ***',
       stderr: 'Not logged in',
     },
   ])('treats Codex $case across output channels as unknown', async ({ stdout, stderr }) => {
@@ -303,10 +385,13 @@ describe('provider auth parsers', () => {
     expect(JSON.stringify(response)).not.toContain(masked);
   });
 
-  it('does not accept known Codex connected output on an unexpected nonzero exit', async () => {
+  it.each([
+    'Logged in using ChatGPT',
+    'API key configured - ***',
+  ])('does not accept known Codex connected output on an unexpected nonzero exit: %s', async (stdout) => {
     const service = new ProviderAuthService({
       runCommand: runner((executable) => executable.includes('codex')
-        ? { stdout: 'Logged in using ChatGPT', stderr: '', exitCode: 7 }
+        ? { stdout, stderr: '', exitCode: 7 }
         : { stdout: 'unrecognized', stderr: '', exitCode: 0 }),
     });
 
@@ -336,10 +421,15 @@ describe('provider auth parsers', () => {
     await expect(statuses(service)).resolves.toMatchObject({ codex: { status: 'unknown' } });
   });
 
-  it('does not guess from unrecognized Codex output', async () => {
+  it.each([
+    'Codex status: account maybe ready',
+    'API key configured',
+    'API key configured - not-a-masked-key',
+    'API key configured - *** extra text',
+  ])('does not guess from unrecognized Codex output: %s', async (stdout) => {
     const service = new ProviderAuthService({
       runCommand: runner((executable) => executable.includes('codex')
-        ? { stdout: 'Codex status: account maybe ready', stderr: '', exitCode: 0 }
+        ? { stdout, stderr: '', exitCode: 0 }
         : { stdout: 'unrecognized', stderr: '', exitCode: 0 }),
     });
 
@@ -439,6 +529,94 @@ describe('provider auth parsers', () => {
     });
 
     await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'disconnected' } });
+  });
+
+  it.each([
+    ['No authenticated integrations', 'disconnected'],
+    ['OpenAI  OPENAI_API_KEY              environment', 'connected'],
+  ])('reads OpenCode 2.0.28 plain answer %s', async (stdout, status) => {
+    const run = runner((executable) => executable === 'opencode'
+      ? { stdout: `${stdout}\n`, stderr: '', exitCode: 0 }
+      : { stdout: 'unrecognized', stderr: '', exitCode: 0 });
+    const service = new ProviderAuthService({ runCommand: run });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status } });
+    // OpenCode 2 probes the same default binary, so an understood answer is two calls and still no fallback.
+    expect(vi.mocked(run).mock.calls.filter(([executable]) => executable === 'opencode')).toHaveLength(2);
+  });
+
+  // Telemetry 107e44a9: OpenCode 2.x answers `auth list` through its background service; one that
+  // cannot start fails with exit 1 and a one-line stderr. A private server still answers.
+  it.each([
+    ['[]', 'disconnected'],
+    [JSON.stringify([{ id: 'opencode-go', name: 'OpenCode Go', connections: [{ type: 'credential', label: 'OpenCode Go' }] }]), 'connected'],
+  ])('asks OpenCode 2.x with a private server when its background service fails: %s', async (json, status) => {
+    const onInconclusive = vi.fn();
+    const run = runner((executable, args) => {
+      if (executable !== 'opencode') return { stdout: 'unrecognized', stderr: '', exitCode: 0 };
+      return args.includes('--standalone')
+        ? { stdout: `${json}\n`, stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: 'Error: Server process exited with code 1\n', exitCode: 1 };
+    });
+    const service = new ProviderAuthService({ runCommand: run, onInconclusive });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status } });
+    expect(run).toHaveBeenCalledWith('opencode', ['auth', 'list', '--standalone', '--format', 'json'], expect.any(Number));
+    expect(onInconclusive).not.toHaveBeenCalledWith(expect.objectContaining({ provider: 'opencode' }));
+  });
+
+  it.each([
+    '{"connections":[]}',
+    '[{"id":"x","connections":[]}]',
+    '[null]',
+  ])('does not guess from malformed OpenCode JSON %s', async (json) => {
+    const service = new ProviderAuthService({
+      runCommand: runner((executable, args) => {
+        if (executable !== 'opencode') return { stdout: 'unrecognized', stderr: '', exitCode: 0 };
+        return args.includes('--standalone')
+          ? { stdout: json, stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: 'Error: Server process exited with code 1\n', exitCode: 1 };
+      }),
+    });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'unknown' } });
+  });
+
+  it.each([
+    ['not installed', { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' }, 'not-installed', 2],
+    ['hung', { stdout: '', stderr: '', exitCode: null, timedOut: true }, 'unknown', 4],
+  ] as const)('does not ask OpenCode with a private server when it is %s', async (_name, answer, status, calls) => {
+    const run = runner((executable) => executable === 'opencode'
+      ? answer
+      : { stdout: 'unrecognized', stderr: '', exitCode: 0 });
+    const service = new ProviderAuthService({ runCommand: run });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status } });
+    expect(vi.mocked(run).mock.calls.filter(([executable]) => executable === 'opencode')).toHaveLength(calls);
+  });
+
+  it('does not re-ask OpenCode 1.x, which answered but rejects the 2.x flags', async () => {
+    const run = runner((executable) => executable === 'opencode'
+      ? { stdout: ['┌  Credentials ~/.local/share/opencode/auth.json', '└  credentials: many'].join('\n'), stderr: '', exitCode: 0 }
+      : { stdout: 'unrecognized', stderr: '', exitCode: 0 });
+    const service = new ProviderAuthService({ runCommand: run });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'unknown' } });
+    // A 1.x answer is not re-asked with 2.x flags. OpenCode 2 makes the same decision on its own probe.
+    expect(vi.mocked(run).mock.calls.filter(([executable]) => executable === 'opencode')).toHaveLength(2);
+  });
+
+  it('keeps OpenCode stderr-only CLI failures out of unrecognized-output telemetry', async () => {
+    const onInconclusive = vi.fn();
+    const run = runner((executable, args) => executable === 'opencode'
+      ? args.includes('--standalone')
+        ? { stdout: '', stderr: 'error: unknown flag --standalone\n', exitCode: 1 }
+        : { stdout: '', stderr: 'Error: Cannot start server\n', exitCode: 1 }
+      : { stdout: 'unrecognized', stderr: '', exitCode: 0 });
+    const service = new ProviderAuthService({ runCommand: run, onInconclusive });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'unknown' } });
+    expect(onInconclusive).not.toHaveBeenCalledWith(expect.objectContaining({ provider: 'opencode' }));
   });
 
   it('does not guess from a malformed OpenCode 2.x credential row', async () => {
@@ -626,6 +804,46 @@ describe('provider auth parsers', () => {
     expect(onInconclusive).not.toHaveBeenCalled();
   });
 
+  // Telemetry 1cd541cc: the --format rejection worded by other arg parsers, and plain-status variants.
+  it.each([
+    ["error: unknown option '--format'\n(Did you mean --force?)\n", ' ✓ Logged in as me@example.com\n', 'connected'],
+    ['Unknown argument: format\n', 'Signed in as me@example.com\n', 'connected'],
+    ["error: unexpected argument '--format' found\n", '✗ You are not logged in. Run `agent login`.\n', 'disconnected'],
+    ['Unrecognized flag: --format\n', "You're not signed in\n", 'disconnected'],
+  ])('falls back to plain `status` when --format is rejected as %j', async (stderr, stdout, expected) => {
+    const onInconclusive = vi.fn();
+    const runCommand = vi.fn<RunProviderCommand>(async (executable, args) => {
+      if (executable !== 'agent') return resultFor(executable);
+      return args.includes('--format') ? { stdout: '', stderr, exitCode: 1 } : { stdout, stderr: '', exitCode: 0 };
+    });
+    const service = new ProviderAuthService({ runCommand, onInconclusive });
+
+    await expect(statuses(service)).resolves.toMatchObject({ cursor: { status: expected } });
+    expect(onInconclusive).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back on an unrelated status failure', async () => {
+    const runCommand = vi.fn<RunProviderCommand>(async (executable) => executable === 'agent'
+      ? { stdout: '', stderr: 'error: network unreachable\n', exitCode: 1 }
+      : resultFor(executable));
+    const service = new ProviderAuthService({ runCommand });
+
+    await expect(statuses(service)).resolves.toMatchObject({ cursor: { status: 'unknown' } });
+    expect(runCommand).not.toHaveBeenCalledWith('agent', ['status'], 10_000);
+  });
+
+  it('never reads "not logged in as" as signed out', async () => {
+    const runCommand = vi.fn<RunProviderCommand>(async (executable, args) => {
+      if (executable !== 'agent') return resultFor(executable);
+      return args.includes('--format')
+        ? { stdout: '', stderr: "error: unknown option '--format'\n", exitCode: 1 }
+        : { stdout: 'not logged in as an admin\n', stderr: '', exitCode: 0 };
+    });
+    const service = new ProviderAuthService({ runCommand });
+
+    await expect(statuses(service)).resolves.toMatchObject({ cursor: { status: 'unknown' } });
+  });
+
   // Telemetry 8d304c50: another program named `agent` (0.2.22) exited 2 with a usage error.
   it('names the PATH shadowing when `agent` answers like a different program', async () => {
     const service = new ProviderAuthService({
@@ -637,6 +855,42 @@ describe('provider auth parsers', () => {
     const cursor = (await statuses(service)).cursor;
     expect(cursor?.status).toBe('unknown');
     expect(cursor?.hint).toContain('CEZ_CURSOR_AGENT_BIN');
+  });
+
+  // Telemetry 8d304c50 regressed after #1503: no Cursor at all, so resolution still ends at the foreign `agent`.
+  it('reports not-installed, unreported, when the only `agent` is another program', async () => {
+    const onInconclusive = vi.fn();
+    const runCommand = vi.fn<RunProviderCommand>(async (executable, args) => {
+      if (executable !== 'agent') return resultFor(executable);
+      return args.includes('--version')
+        ? { stdout: '0.2.22\n', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: 'usage: agent [-h] {run,serve}\nagent: error: invalid choice', exitCode: 2 };
+    });
+    const service = new ProviderAuthService({ runCommand, onInconclusive });
+
+    const cursor = (await statuses(service)).cursor;
+    expect(cursor?.status).toBe('not-installed');
+    expect(cursor?.hint).toContain('CEZ_CURSOR_AGENT_BIN');
+    expect(onInconclusive).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Cursor itself', 'agent', undefined, '2026.01.28-fd13201\n'],
+    ['an explicit override', 'agent', 'agent', '0.2.22\n'],
+    ['an unreadable version', 'agent', undefined, 'agent: error\n'],
+  ])('keeps an unreadable status unknown for %s', async (_label, executable, override, version) => {
+    if (override) process.env.CEZ_CURSOR_AGENT_BIN = override;
+    const onInconclusive = vi.fn();
+    const runCommand = vi.fn<RunProviderCommand>(async (bin, args) => {
+      if (bin !== executable) return resultFor(bin);
+      return args.includes('--version')
+        ? { stdout: version, stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: 'boom', exitCode: 2 };
+    });
+    const service = new ProviderAuthService({ runCommand, onInconclusive });
+
+    await expect(statuses(service)).resolves.toMatchObject({ cursor: { status: 'unknown' } });
+    expect(onInconclusive).toHaveBeenCalledWith(expect.objectContaining({ provider: 'cursor', reason: 'unexpected_exit' }));
   });
 
   describe('Cursor CURSOR_API_KEY precheck', () => {
@@ -701,6 +955,32 @@ describe('provider auth parsers', () => {
     await expect(statuses(service)).resolves.toMatchObject({ pi: { status: 'disconnected' } });
   });
 
+  // Telemetry f67df9d2: pi 0.73.1 with a piped stdin writes its whole answer to stderr, exit 0.
+  it.each([
+    [
+      'disconnected',
+      'No models available. Use /login to log into a provider via OAuth or API key. See:\n'
+        + '  /usr/lib/node_modules/@mariozechner/pi-coding-agent/docs/providers.md\n'
+        + '  /usr/lib/node_modules/@mariozechner/pi-coding-agent/docs/models.md\n',
+    ],
+    [
+      'connected',
+      'provider   model              context  max-out  thinking  images\n'
+        + 'anthropic  claude-sonnet-4-5  200K     64K      yes       yes\n',
+    ],
+  ] as const)('reads a pi 0.73 stderr-only answer as %s', async (expected, stderr) => {
+    const onInconclusive = vi.fn();
+    const service = new ProviderAuthService({
+      onInconclusive,
+      runCommand: runner((executable) => executable === 'pi'
+        ? { stdout: '', stderr, exitCode: 0 }
+        : { stdout: 'unrecognized', stderr: '', exitCode: 0 }),
+    });
+
+    await expect(statuses(service)).resolves.toMatchObject({ pi: { status: expected } });
+    expect(onInconclusive).not.toHaveBeenCalledWith(expect.objectContaining({ provider: 'pi' }));
+  });
+
   it('does not guess from unrecognized pi model output', async () => {
     const service = new ProviderAuthService({
       runCommand: runner((executable) => executable === 'pi'
@@ -755,6 +1035,27 @@ describe('Grok `grok models` probe', () => {
 });
 
 describe('ProviderAuthService', () => {
+  it('probes Antigravity with `agy models` like any other installed CLI — no opt-in', async () => {
+    const runCommand = vi.fn(runner());
+    expect((await statuses(new ProviderAuthService({ runCommand }))).antigravity?.status).toBe('connected');
+    expect(runCommand.mock.calls.some(([bin, args]) => bin === 'agy' && args[0] === 'models')).toBe(true);
+  });
+
+  it('reads a signed-out agy as disconnected and an unrelated failure as unknown', async () => {
+    const signedOut = new ProviderAuthService({
+      runCommand: runner((executable) => executable === 'agy'
+        ? { stdout: '', stderr: 'Please sign in to continue', exitCode: 1 }
+        : resultFor(executable)),
+    });
+    await expect(statuses(signedOut)).resolves.toMatchObject({ antigravity: { status: 'disconnected' } });
+    const broken = new ProviderAuthService({
+      runCommand: runner((executable) => executable === 'agy'
+        ? { stdout: '', stderr: 'network unreachable', exitCode: 1 }
+        : resultFor(executable)),
+    });
+    await expect(statuses(broken)).resolves.toMatchObject({ antigravity: { status: 'unknown' } });
+  });
+
   it('always returns every provider in descriptor order', async () => {
     const service = new ProviderAuthService({ runCommand: runner() });
 
@@ -763,10 +1064,12 @@ describe('ProviderAuthService', () => {
         { provider: 'claude' },
         { provider: 'codex' },
         { provider: 'opencode' },
+        { provider: 'opencode2' },
         { provider: 'cursor' },
         { provider: 'pi' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot' },
+        { provider: 'antigravity' },
         { provider: 'grok' },
       ],
     });
@@ -789,9 +1092,11 @@ describe('ProviderAuthService', () => {
       { executable: 'claude', args: ['auth', 'status', '--json'], timeoutMs: 10_000 },
       { executable: 'codex', args: ['login', 'status'], timeoutMs: 10_000 },
       { executable: 'opencode', args: ['auth', 'list'], timeoutMs: 10_000 },
+      { executable: 'opencode', args: ['auth', 'list'], timeoutMs: 10_000 },
       { executable: 'agent', args: ['status', '--format', 'json'], timeoutMs: 10_000 },
       { executable: 'pi', args: ['--list-models'], timeoutMs: 10_000 },
       { executable: 'copilot', args: ['--acp', '--no-auto-update'], timeoutMs: 10_000 },
+      { executable: 'agy', args: ['models'], timeoutMs: 10_000 },
       { executable: 'grok', args: ['models'], timeoutMs: 10_000 },
     ]);
     release();
@@ -1318,10 +1623,12 @@ describe('ProviderAuthService', () => {
         { provider: 'claude', status: 'connected' },
         { provider: 'codex', status: 'connected' },
         { provider: 'opencode', status: 'connected' },
+        { provider: 'opencode2', status: 'connected' },
         { provider: 'cursor', status: 'connected' },
         { provider: 'pi', status: 'connected' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot', status: 'connected' },
+        { provider: 'antigravity', status: 'connected' },
         { provider: 'grok', status: 'connected' },
       ],
     });
@@ -1388,6 +1695,22 @@ describe('ProviderAuthService', () => {
     expect(runCommand).toHaveBeenCalledWith('/tools/opencode custom', ['auth', 'list'], 10_000);
     expect(service.loginCommand('codex')).toBe("'/tools/codex custom' login");
     expect(service.loginCommand('opencode')).toBe("'/tools/opencode custom' auth login");
+    // OpenCode 2 does not follow the 1.x override. Unset, it still probes `opencode`.
+    expect(runCommand).toHaveBeenCalledWith('opencode', ['auth', 'list'], 10_000);
+    expect(service.loginCommand('opencode2')).toBe("'opencode' auth login");
+  });
+
+  it('uses CEZ_OPENCODE2_BIN for OpenCode 2 and leaves the 1.x override alone', async () => {
+    process.env.CEZ_OPENCODE_BIN = '/tools/opencode-1';
+    process.env.CEZ_OPENCODE2_BIN = '/tools/opencode-2 custom';
+    const runCommand = runner();
+    const service = new ProviderAuthService({ runCommand, platform: 'linux' });
+
+    await service.status();
+    expect(runCommand).toHaveBeenCalledWith('/tools/opencode-1', ['auth', 'list'], 10_000);
+    expect(runCommand).toHaveBeenCalledWith('/tools/opencode-2 custom', ['auth', 'list'], 10_000);
+    expect(service.loginCommand('opencode')).toBe("'/tools/opencode-1' auth login");
+    expect(service.loginCommand('opencode2')).toBe("'/tools/opencode-2 custom' auth login");
   });
 
   it('uses CEZ_PI_BIN for the model-availability probe and interactive login', async () => {
@@ -1443,10 +1766,12 @@ describe('ProviderAuthService', () => {
         { provider: 'claude', status: 'connected' },
         { provider: 'codex', status: 'connected' },
         { provider: 'opencode', status: 'connected' },
+        { provider: 'opencode2', status: 'connected' },
         { provider: 'cursor', status: 'connected' },
         { provider: 'pi', status: 'connected' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot', status: 'connected' },
+        { provider: 'antigravity', status: 'connected' },
         { provider: 'grok', status: 'connected' },
       ],
     });
@@ -1687,6 +2012,141 @@ describe('inconclusive probe reports', () => {
     expect(onInconclusive.mock.calls[0]?.[0]).toMatchObject({ provider: 'codex', reason: 'unrecognized_output' });
   });
 
+  // Telemetry ce0c5d1f: Ctrl-C reached the probe too, `opencode` exited 130 and was reported.
+  it('asks again when a signal interrupted the CLI', async () => {
+    let codexCalls = 0;
+    const onInconclusive = vi.fn();
+    const service = new ProviderAuthService({
+      runCommand: async (executable) => {
+        if (executable !== 'codex') return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
+        codexCalls += 1;
+        return codexCalls === 1 ? { stdout: '', stderr: '', exitCode: 130 } : connectedResults.codex!;
+      },
+      onInconclusive,
+    });
+    const status = await service.status({ refresh: true });
+    expect(status.providers.find((row) => row.provider === 'codex')?.status).toBe('connected');
+    expect(codexCalls).toBe(2);
+    expect(onInconclusive).not.toHaveBeenCalled();
+  });
+
+  it('never reports a probe that stays interrupted', async () => {
+    for (const result of [
+      { stdout: '', stderr: '', exitCode: 130 },
+      { stdout: '', stderr: '', exitCode: 143 },
+      { stdout: '', stderr: '', exitCode: null, signal: 'SIGINT' },
+    ]) {
+      const runCommand = vi.fn(codexOnly(result));
+      expect(await reasonsFor(result)).toEqual([]);
+      const service = new ProviderAuthService({ runCommand });
+      const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'codex');
+      expect(row).toMatchObject({ status: 'unknown', hint: expect.stringContaining('interrupted') });
+      expect(runCommand.mock.calls.filter(([executable]) => executable === 'codex')).toHaveLength(2);
+    }
+  });
+
+  // Telemetry e316b141: claude and codex timed out together on a busy Windows host, then both
+  // answered `--version` at once — a stall from the concurrent burst, not a CLI defect.
+  it('asks a timed-out CLI once more with a longer budget', async () => {
+    const timeouts: number[] = [];
+    const onInconclusive = vi.fn();
+    const service = new ProviderAuthService({
+      runCommand: async (executable, _args, timeoutMs) => {
+        if (executable !== 'codex') return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
+        timeouts.push(timeoutMs);
+        return timeouts.length === 1
+          ? { stdout: '', stderr: '', exitCode: null, timedOut: true }
+          : connectedResults.codex!;
+      },
+      onInconclusive,
+    });
+    const status = await service.status({ refresh: true });
+    expect(status.providers.find((row) => row.provider === 'codex')?.status).toBe('connected');
+    expect(timeouts).toEqual([10_000, 30_000]);
+    expect(onInconclusive).not.toHaveBeenCalled();
+  });
+
+  it('reports a timeout only once the longer second ask hung too', async () => {
+    const timeout = { stdout: '', stderr: '', exitCode: null, timedOut: true };
+    const runCommand = vi.fn(codexOnly(timeout));
+    const onInconclusive = vi.fn();
+    const service = new ProviderAuthService({ runCommand, onInconclusive });
+    const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'codex');
+    expect(row).toMatchObject({ status: 'unknown', hint: expect.stringContaining('timed out') });
+    expect(runCommand.mock.calls.filter(([executable, args]) => executable === 'codex' && args[0] !== '--version')
+      .map(([, , timeoutMs]) => timeoutMs)).toEqual([10_000, 30_000]);
+    expect(onInconclusive.mock.calls[0]?.[0]).toMatchObject({ reason: 'timeout' });
+  });
+
+  // Telemetry b28d2993: the same burst as e316b141 hit claude, which had been connected for days;
+  // the hang turned it `unknown` and the action gate refused runs against a login that was fine.
+  describe('a probe that hangs after a connected answer', () => {
+    const hang: ProviderCommandResult = { stdout: '', stderr: '', exitCode: null, timedOut: true };
+    const scripted = (answers: ProviderCommandResult[]): RunProviderCommand => async (executable, args) => {
+      if (args[0] === '--version') return { stdout: 'codex-cli 0.46.0\n', stderr: '', exitCode: 0 };
+      if (executable !== 'codex') return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
+      return answers.shift() ?? hang;
+    };
+    const codexRow = async (service: ProviderAuthService) =>
+      (await service.status({ refresh: true })).providers.find((row) => row.provider === 'codex');
+
+    it('keeps the recent connected answer, and still reports the hang', async () => {
+      let now = 1_000;
+      const onInconclusive = vi.fn();
+      const service = new ProviderAuthService({
+        runCommand: scripted([connectedResults.codex!]),
+        now: () => now,
+        onInconclusive,
+      });
+      expect(await codexRow(service)).toEqual({ provider: 'codex', status: 'connected' });
+      now += 20 * 60_000;
+      expect(await codexRow(service)).toEqual({ provider: 'codex', status: 'connected' });
+      expect(onInconclusive.mock.calls[0]?.[0]).toMatchObject({ provider: 'codex', reason: 'timeout' });
+    });
+
+    it('lets the hang show once the connected answer is too old to vouch for the login', async () => {
+      let now = 1_000;
+      const service = new ProviderAuthService({ runCommand: scripted([connectedResults.codex!]), now: () => now });
+      await codexRow(service);
+      now += 31 * 60_000;
+      expect(await codexRow(service)).toMatchObject({ status: 'unknown', hint: expect.stringContaining('timed out') });
+    });
+
+    it('never bridges past an answer the CLI actually gave', async () => {
+      const service = new ProviderAuthService({
+        runCommand: scripted([connectedResults.codex!, { stdout: 'Not logged in', stderr: '', exitCode: 1 }]),
+        now: () => 1_000,
+      });
+      await codexRow(service);
+      expect((await codexRow(service))?.status).toBe('disconnected');
+      expect(await codexRow(service)).toMatchObject({ status: 'unknown', hint: expect.stringContaining('timed out') });
+    });
+
+    it('never bridges past a runtime rejection', async () => {
+      const service = new ProviderAuthService({ runCommand: scripted([connectedResults.codex!]), now: () => 1_000 });
+      await codexRow(service);
+      const report = service.reportRuntimeAuthFailure('codex');
+      service.clearRuntimeAuthFailure('codex', report!.status.authFailureId);
+      expect(await codexRow(service)).toMatchObject({ status: 'unknown', hint: expect.stringContaining('timed out') });
+    });
+
+    it('bridges a named account only for the dir that answered, and never lifts its latch', async () => {
+      const service = new ProviderAuthService({ runCommand: scripted([connectedResults.codex!]), now: () => 1_000 });
+      const account = { id: 'work', configDir: '/work' };
+      expect((await service.profileStatus('codex', account)).status).toBe('connected');
+      service.forgetProfileStatus('codex', 'work');
+      service.reportProfileAuthFailure('codex', 'work');
+      expect((await service.profileStatus('codex', account)).status).toBe('disconnected');
+
+      const other = new ProviderAuthService({ runCommand: scripted([connectedResults.codex!]), now: () => 1_000 });
+      await other.profileStatus('codex', account);
+      other.forgetProfileStatus('codex', 'work');
+      expect((await other.profileStatus('codex', account)).status).toBe('connected');
+      other.forgetProfileStatus('codex', 'work');
+      expect((await other.profileStatus('codex', { id: 'work', configDir: '/elsewhere' })).status).toBe('unknown');
+    });
+  });
+
   it('tells an unexpected exit, a spawn error, a timeout and a throw apart', async () => {
     expect((await reasonsFor({ stdout: '', stderr: '', exitCode: 3 }))[0]?.reason).toBe('unexpected_exit');
     expect((await reasonsFor({ stdout: '', stderr: '', exitCode: null, errorCode: 'EINVAL' }))[0])
@@ -1744,7 +2204,10 @@ describe('inconclusive probe reports', () => {
     const service = new ProviderAuthService({
       runCommand: async (executable, args) => {
         if (executable !== 'copilot') return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
-        if (args[0] === '--version') return { stdout: 'copilot version: v1.34.1\n', stderr: '', exitCode: 0 };
+        if (args.includes('--version')) {
+          expect(args).toEqual(['--no-auto-update', '--version']);
+          return { stdout: 'copilot version: v1.34.1\n', stderr: '', exitCode: 0 };
+        }
         return { stdout: 'something that is not JSON-RPC\n', stderr: 'warning', exitCode: 0 };
       },
       onInconclusive,
@@ -1754,6 +2217,42 @@ describe('inconclusive probe reports', () => {
     const [probe] = onInconclusive.mock.calls.map(([call]) => call);
     expect(probe).toMatchObject({ provider: 'copilot', reason: 'unrecognized_output' });
     expect(await probe.cliVersion()).toBe('1.34.1');
+  });
+
+  // #1580 (telemetry 298c2e1f): exit 0, 36 bytes of non-frame stdout, and `--version` with no semver.
+  describe('a `copilot` that is not a working Copilot CLI', () => {
+    const rowFor = async (version: ProviderCommandResult, onInconclusive = vi.fn()) => {
+      const service = new ProviderAuthService({
+        runCommand: async (executable, args) => {
+          if (executable !== 'copilot') return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
+          if (args.includes('--version')) return version;
+          return { stdout: 'x'.repeat(36), stderr: 'y'.repeat(103), exitCode: 0 };
+        },
+        onInconclusive,
+      });
+      return (await service.status({ refresh: true })).providers.find((p) => p.provider === 'copilot');
+    };
+
+    it('is not-installed with the update hint and sends no report when --version has no semver', async () => {
+      const onInconclusive = vi.fn();
+      const row = await rowFor({ stdout: 'hello\n', stderr: '', exitCode: 0 }, onInconclusive);
+      expect(row).toMatchObject({ status: 'not-installed', hint: expect.stringContaining('npm i -g @github/copilot') });
+      expect(onInconclusive).not.toHaveBeenCalled();
+    });
+
+    it('is not-installed when an old CLI rejects --no-auto-update', async () => {
+      const onInconclusive = vi.fn();
+      const row = await rowFor({ stdout: '', stderr: "error: unknown option '--no-auto-update'", exitCode: 1 }, onInconclusive);
+      expect(row?.status).toBe('not-installed');
+      expect(onInconclusive).not.toHaveBeenCalled();
+    });
+
+    it('guards: a version printed on stderr only still counts as a Copilot CLI', async () => {
+      const onInconclusive = vi.fn();
+      const row = await rowFor({ stdout: '', stderr: 'GitHub Copilot CLI 1.0.98.\n', exitCode: 0 }, onInconclusive);
+      expect(row?.status).toBe('unknown');
+      expect(onInconclusive).toHaveBeenCalledTimes(1);
+    });
   });
 
   // Telemetry f67df9d2: an asdf shim named `pi`, exit 1, nothing on stdout, Python's version on stderr.
@@ -1777,6 +2276,41 @@ describe('inconclusive probe reports', () => {
     expect(onInconclusive).not.toHaveBeenCalled();
   });
 
+  // f67df9d2 regressed in 0.16.0: the shim's stderr matched none of #1504's patterns. Whatever its
+  // wording, a `pi` that cannot answer `--version` is not a working pi.
+  it('reports a `pi` that cannot answer --version as not-installed, whatever its stderr says', async () => {
+    const onInconclusive = vi.fn();
+    const stderr = 'pi: shim has no active version (wanted python 3.11.9); try `tool install`\n';
+    const service = new ProviderAuthService({
+      runCommand: async (executable) => executable === 'pi'
+        ? { stdout: '', stderr, exitCode: 1 }
+        : resultFor(executable),
+      onInconclusive,
+    });
+    const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'pi');
+    expect(row).toMatchObject({ status: 'not-installed', hint: expect.stringContaining('CEZ_PI_BIN') });
+    expect(onInconclusive).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a pi that answers --version', undefined],
+    ['an explicit CEZ_PI_BIN', 'pi'],
+  ])('keeps a failed pi status unknown and reported for %s', async (_label, override) => {
+    if (override) process.env.CEZ_PI_BIN = override;
+    const onInconclusive = vi.fn();
+    const service = new ProviderAuthService({
+      runCommand: async (executable, args) => {
+        if (executable !== 'pi') return resultFor(executable);
+        if (args.includes('--version')) return override ? { stdout: '', stderr: 'boom', exitCode: 1 } : { stdout: '1.3.0\n', stderr: '', exitCode: 0 };
+        return { stdout: '', stderr: 'Error: provider config unreadable\n', exitCode: 1 };
+      },
+      onInconclusive,
+    });
+    const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'pi');
+    expect(row?.status).toBe('unknown');
+    expect(onInconclusive).toHaveBeenCalledWith(expect.objectContaining({ provider: 'pi', reason: 'unrecognized_output' }));
+  });
+
   it('recognizes the mise and pyenv shim misses, and never re-reads a successful answer', () => {
     expect(versionManagerShimMiss({ stdout: '', stderr: 'mise ERROR No version is set for shim: pi\nSet a global default version with one of the following:\nmise use -g python@3.11.9\n', exitCode: 1 }))
       .toBe('No version is set for shim: pi');
@@ -1790,12 +2324,154 @@ describe('inconclusive probe reports', () => {
 
   it('keeps the generic hint when Copilot spoke ACP but the answer was unreadable', async () => {
     const service = new ProviderAuthService({
-      runCommand: async (executable) => executable === 'copilot'
-        ? { stdout: '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"Internal error"}}', stderr: '', exitCode: 0 }
+      runCommand: async (executable, args) => executable === 'copilot'
+        ? args.includes('--version')
+          ? { stdout: 'GitHub Copilot CLI 1.0.98.\n', stderr: '', exitCode: 0 }
+          : { stdout: '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"Internal error"}}', stderr: '', exitCode: 0 }
         : { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' },
     });
     const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'copilot');
     expect(row).toMatchObject({ status: 'unknown', hint: 'Authentication could not be verified. Try again.' });
+  });
+
+  // Telemetry 298c2e1f: Copilot's ACP server exits on stdin EOF without answering a request still
+  // in flight, so a probe that closed stdin right after writing lost a slow `session/new`.
+  it('holds stdin open until an ACP server has answered session/new', async () => {
+    const server = [
+      "const rl = require('node:readline').createInterface({ input: process.stdin });",
+      "rl.on('line', (line) => { const { id } = JSON.parse(line);",
+      "  const answer = () => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: id === 1 ? { sessionId: 's' } : {} }) + '\\n');",
+      '  if (id === 1) setTimeout(answer, 300); else answer(); });',
+      "rl.on('close', () => process.exit(0));",
+    ].join('\n');
+    const payload = '{"jsonrpc":"2.0","id":0,"method":"initialize"}\n{"jsonrpc":"2.0","id":1,"method":"session/new"}\n';
+    const result = await defaultRunProviderCommand(
+      process.execPath,
+      ['-e', server],
+      10_000,
+      undefined,
+      { payload, closeWhen: copilotAcpAnswered },
+    );
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false });
+    expect(result.stdout).toContain('"sessionId":"s"');
+  });
+
+  // Telemetry 5f52beba: Copilot 1.0.103 (Windows) answered session/new, then never exited on EOF;
+  // the timeout killed it and its complete answer was reported as a hang.
+  it('keeps an ACP answer whose server outlives EOF, and stops waiting for it to exit', async () => {
+    const lingering = [
+      "const rl = require('node:readline').createInterface({ input: process.stdin });",
+      "rl.on('line', (line) => { const { id } = JSON.parse(line);",
+      "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: id === 1 ? { sessionId: 's' } : {} }) + '\\n'); });",
+      'setInterval(() => {}, 1_000);',
+    ].join('\n');
+    const onInconclusive = vi.fn();
+    const results: Array<{ signal?: string; timedOut?: boolean }> = [];
+    const service = new ProviderAuthService({
+      runCommand: async (executable, _args, _timeoutMs, _env, stdin) => {
+        if (executable !== 'copilot') return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
+        const result = await defaultRunProviderCommand(process.execPath, ['-e', lingering], 8_000, undefined, stdin);
+        results.push(result);
+        return result;
+      },
+      onInconclusive,
+    });
+    const started = Date.now();
+    const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'copilot');
+    expect(row?.status).toBe('connected');
+    expect(onInconclusive).not.toHaveBeenCalled();
+    expect(Date.now() - started).toBeLessThan(6_000);
+    // cezar's own linger kill is not an interruption: no `signal` for wasInterrupted() to re-ask over.
+    expect(results.at(-1)).toMatchObject({ timedOut: false });
+    expect(results.at(-1)?.signal).toBeUndefined();
+  }, 20_000);
+
+  // 298c2e1f regressed in 0.16.1: the CLI then exits 0 on EOF with only `initialize` answered,
+  // which read as unrecognized output and never got the longer re-ask a timeout gets.
+  it('closes a held-open stdin before the timeout and calls the missing answer a timeout', async () => {
+    const result = await defaultRunProviderCommand(
+      process.execPath,
+      ['-e', "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('bye'));"],
+      2_500,
+      undefined,
+      { payload: 'not acp\n', closeWhen: copilotAcpAnswered },
+    );
+    expect(result).toMatchObject({ exitCode: 0, timedOut: true, stdout: 'bye' });
+  });
+
+  it('re-asks Copilot with the longer budget when session/new outlasted the first one', async () => {
+    const onInconclusive = vi.fn();
+    const budgets: number[] = [];
+    const service = new ProviderAuthService({
+      runCommand: async (executable, args, timeoutMs, _env, stdin) => {
+        if (executable !== 'copilot') return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
+        budgets.push(timeoutMs);
+        const initialized = '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}\n';
+        return budgets.length === 1
+          ? defaultRunProviderCommand(process.execPath, ['-e', `process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(${JSON.stringify(initialized)}));`], 2_200, undefined, stdin)
+          : { stdout: `${initialized}${connectedResults.copilot!.stdout}\n`, stderr: '', exitCode: 0 };
+      },
+      onInconclusive,
+    });
+    const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'copilot');
+    expect(row?.status).toBe('connected');
+    expect(budgets).toEqual([10_000, 30_000]);
+    expect(onInconclusive).not.toHaveBeenCalled();
+  });
+
+  // Telemetry acfb01e4: a CLI that exits before reading its payload raised an uncaught EPIPE.
+  it.each([
+    ['held open', copilotAcpAnswered],
+    ['closed at once', undefined],
+  ])('never lets a payload a CLI did not read crash cezar (stdin %s)', async (_label, closeWhen) => {
+    const result = await defaultRunProviderCommand(
+      process.execPath,
+      ['-e', 'process.exit(3)'],
+      5_000,
+      undefined,
+      { payload: 'x'.repeat(4 * 1024 * 1024), ...(closeWhen ? { closeWhen } : {}) },
+    );
+    expect(result.exitCode).toBe(3);
+  });
+
+  // Telemetry 35838a52 + b82b92cf: claude and codex both failed before answering, `claude
+  // --version` too — cezar's own cwd was unusable (deleted, or a folder the macOS app can't read).
+  it('runs a probe from the home directory when cezar\'s own cwd is unusable', async () => {
+    const gone = join(tmpdir(), `cez-gone-${process.pid}-${Date.now()}`);
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(gone);
+    try {
+      expect(probeCwdFallback()).toBe(homedir());
+      const result = await defaultRunProviderCommand(process.execPath, ['-e', 'process.stdout.write(process.cwd())'], 5_000);
+      expect(result.stdout).toBe(homedir());
+    } finally {
+      cwd.mockRestore();
+    }
+    expect(probeCwdFallback()).toBeUndefined();
+  });
+
+  // Telemetry a5c13018: exit 127, 176 bytes of stderr, no `--version` either — a wrapper whose
+  // shell could not find what it launches.
+  it('reports a launcher that exits 127 or 126 as not-installed, not inconclusive', async () => {
+    for (const exitCode of [127, 126]) {
+      const onInconclusive = vi.fn();
+      const service = new ProviderAuthService({
+        runCommand: async (executable) => executable === 'copilot'
+          ? { stdout: '', stderr: '/usr/local/bin/copilot: line 3: node: command not found\n', exitCode }
+          : { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' },
+        onInconclusive,
+      });
+      const row = (await service.status({ refresh: true })).providers.find((p) => p.provider === 'copilot');
+      expect(row).toMatchObject({ status: 'not-installed', hint: expect.stringContaining('node: command not found') });
+      expect(row?.hint).toContain('CEZ_COPILOT_BIN');
+      expect(onInconclusive).not.toHaveBeenCalled();
+    }
+  });
+
+  it('recognizes the session/new answer, result or error, and nothing earlier', () => {
+    expect(copilotAcpAnswered('{"jsonrpc":"2.0","id":0,"result":{}}\n')).toBe(false);
+    expect(copilotAcpAnswered('{"jsonrpc":"2.0","id":1,"result":{"sessionId":"x"}}')).toBe(true);
+    expect(copilotAcpAnswered('{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Authentication required"}}')).toBe(true);
+    expect(copilotAcpAnswered('{"jsonrpc":"2.0","id":10,"result":{}}')).toBe(false);
   });
 
   it('reads a version with or without a leading v, never from inside a longer number', () => {

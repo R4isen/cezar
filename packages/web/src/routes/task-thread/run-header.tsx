@@ -8,6 +8,7 @@ import {
   ChevronsUpDownIcon,
   CircleStopIcon,
   CopyIcon,
+  FolderMinusIcon,
   EllipsisIcon,
   EllipsisVerticalIcon,
   MailIcon,
@@ -69,16 +70,19 @@ import { cn, isHttpUrl } from '@/lib/utils'
 
 import {
   isRunActive,
+  canRemoveTaskWorktree,
   resumeHint,
   runActionFlags,
 } from './run-actions'
 import { GitActions } from '../task-git/git-toolbar'
 import { useRunGitStep, type RunGitStep } from '../task-git/run-git-step'
 import { RunConfirmDialog } from './run-confirm-dialog'
+import { TaskWorktreeRemovalDialog } from './task-worktree-removal'
 import { useRunEngine } from './run-engine'
 import { WorkflowSteps } from './step-rail'
 import { useDraft } from './thread-draft'
 import { copyToClipboard, useCanOpenTerminal, useRunActions, useRunOpenChoices, type RunActions } from './use-run-actions'
+import { writeClipboard } from '@/lib/clipboard'
 
 /**
  * The run header (spec §"Task thread" → Header): editable title + status pill, the meta line,
@@ -120,8 +124,8 @@ interface RunHeaderProps {
   continuationEngine?: ReactNode
   /** Replaces the route tab links — the task workspace's layout strip (spec `2026-10-07-task-workspace` §5.2). */
   tabs?: ReactNode
-  /** Right after the tab row's links or strip — the workspace's terminal toggle and full view. */
-  trailing?: ReactNode
+  /** Icon controls in the title row, just before the collapse button — the workspace's full view. */
+  headerActions?: ReactNode
   /** Span the whole window, like the workspace columns under it, instead of the reading measure. */
   wide?: boolean
 }
@@ -133,7 +137,7 @@ const headerPropComparators = {
   onMarkedUnread: (before, after) => before.onMarkedUnread === after.onMarkedUnread,
   continuationEngine: (before, after) => before.continuationEngine === after.continuationEngine,
   tabs: (before, after) => before.tabs === after.tabs,
-  trailing: (before, after) => before.trailing === after.trailing,
+  headerActions: (before, after) => before.headerActions === after.headerActions,
   wide: (before, after) => before.wide === after.wide,
   planTally: (before, after) => before.planTally?.done === after.planTally?.done &&
     before.planTally?.total === after.planTally?.total,
@@ -151,7 +155,7 @@ function RunHeaderView({
   onMarkedUnread,
   continuationEngine,
   tabs,
-  trailing,
+  headerActions,
   wide = false,
 }: RunHeaderProps) {
   const attention = deriveAttention(run)
@@ -206,6 +210,7 @@ function RunHeaderView({
             <span className="ml-auto flex shrink-0 items-center gap-2.5">
               {/* The run's state, top right, beside the git button it decides. */}
               <RunStatus attention={attention} queuePosition={queuePosition} />
+              {headerActions}
               {/* Desktop: fold the meta row, the step rail and the resume hint away, leaving the
                   title and the tabs. Phones have their own disclosure (#765) below. */}
               <Button
@@ -260,8 +265,10 @@ function RunHeaderView({
               // button is the title row's, top right. There is no Finish here: ending a waiting
               // session sits beside the "waiting for your reply" hint over the composer, and
               // accepting a review is the review panel's ✓ Accept.
+              // No `ml-auto` on the actions: the usage before them already pushes right, and a second
+              // auto margin would split the free space and strand cost and agent mid-row.
               actions={
-                <div data-slot="run-actions" className="ml-auto hidden items-center gap-1 md:flex">
+                <div data-slot="run-actions" className="hidden items-center gap-1 md:flex">
                   <TaskItemActions run={run} actions={actions} showRunControls={!composerOwnsRunControls} />
                   {/* Terminal is folded into the Open in… menu to save room. */}
                   <OpenInMenuForRun run={run} canResume={canTerminal} onResume={() => actions.terminal.mutate()} />
@@ -326,7 +333,6 @@ function RunHeaderView({
                 ) : null}
               </>
             )}
-            {trailing}
           </div>
 
           {run.steps.length > 0 ? (
@@ -349,6 +355,10 @@ function RunHeaderView({
           onOpenChange={(open) => !open && actions.setConfirming(null)}
           onConfirm={(kind) => (kind === 'delete' ? actions.delete.mutate() : actions.cancel.mutate())}
         />
+        {actions.worktreeRemovalOpen ? (
+          <TaskWorktreeRemovalDialog key={run.id} run={run} pending={actions.removeWorktree.isPending}
+            onClose={() => actions.setWorktreeRemovalOpen(false)} onConfirm={() => actions.removeWorktree.mutate()} />
+        ) : null}
       </header>
     </ReferenceStatusProvider>
   )
@@ -384,7 +394,7 @@ function RunProgress({
         // The plan dock's compact mirror (spec: "mirrored as a compact progress line in the run
         // header"). Desktop only since #764: on a phone the dock it mirrors is itself on screen,
         // so the mirror would spend the tightest row here restating it.
-        <span data-slot="plan-mirror" className="hidden shrink-0 text-[11px] text-soft-foreground tabular-nums md:inline">
+        <span data-slot="plan-mirror" className="hidden shrink-0 text-meta text-soft-foreground tabular-nums md:inline">
           Plan {planTally.done}/{planTally.total}
         </span>
       ) : null}
@@ -488,7 +498,7 @@ function TaskItemActions({
       >
         <Trash2Icon aria-hidden="true" />
       </IconAction>
-      {moreStop || moreEnd ? (
+      {moreStop || moreEnd || canRemoveTaskWorktree(run) ? (
         <DropdownMenu>
           <IconTooltip label="More actions">
             <DropdownMenuTrigger asChild>
@@ -498,6 +508,11 @@ function TaskItemActions({
             </DropdownMenuTrigger>
           </IconTooltip>
           <DropdownMenuContent align="end" data-slot="run-more-menu">
+            {canRemoveTaskWorktree(run) ? (
+              <DropdownMenuItem disabled={actions.removeWorktree.isPending} onSelect={() => actions.setWorktreeRemovalOpen(true)}>
+                <FolderMinusIcon aria-hidden="true" /> Remove worktree…
+              </DropdownMenuItem>
+            ) : null}
             {moreEnd ? (
               <DropdownMenuItem onSelect={() => actions.finish.mutate()}>
                 <CheckIcon aria-hidden="true" /> End session
@@ -587,8 +602,7 @@ function OpenInMenuForRun({
   const copyPath = () => {
     const path = run.worktreePath
     if (!path) return
-    void navigator.clipboard
-      .writeText(path)
+    void writeClipboard(path)
       .then(() => toast('Worktree path copied'))
       .catch(() => toast(`Path: ${path}`))
   }
@@ -659,12 +673,12 @@ function EditableTitle({ run }: { run: ApiRun }) {
   }, [draft.hasDraft, draft.ready, draft.text, editing])
 
   if (editor.editing) {
-    return <TitleEditInput editor={drafted} className="flex-1 text-[15px] font-semibold" />
+    return <TitleEditInput editor={drafted} className="flex-1 text-lead font-semibold" />
   }
 
   return (
     <span className="group flex min-w-0 items-center gap-1">
-      <h1 className="min-w-0 truncate text-[15px] font-semibold" title={run.task}>
+      <h1 className="min-w-0 truncate text-lead font-semibold" title={run.task}>
         {title}
       </h1>
       <button
@@ -693,12 +707,7 @@ function CopyBranchChip({ branch }: { branch: string }) {
   )
 
   const copy = () => {
-    if (!navigator.clipboard) {
-      toast(`Branch: ${branch}`)
-      return
-    }
-    void navigator.clipboard
-      .writeText(branch)
+    void writeClipboard(branch)
       .then(() => {
         setCopied(true)
         setTooltipOpen(true)
@@ -724,7 +733,7 @@ function CopyBranchChip({ branch }: { branch: string }) {
             <button
               type="button"
               data-slot="branch-chip"
-              className="cursor-copy rounded-sm border border-border bg-card px-1.5 py-px font-mono text-[11px] font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="cursor-copy rounded-sm border border-border bg-card px-1.5 py-px font-mono text-meta font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
               aria-label={`Copy branch name ${branch}`}
               onClick={copy}
             >
@@ -802,7 +811,7 @@ function MetaRow({
         <Link
           key="automation"
           to={`/automations/${encodeURIComponent(run.automation.automationId)}/log`}
-          className="rounded-sm border border-border bg-card px-1.5 py-px text-[11px] font-medium hover:text-foreground"
+          className="rounded-sm border border-border bg-card px-1.5 py-px text-meta font-medium hover:text-foreground"
         >
           Automation
         </Link>
@@ -811,7 +820,7 @@ function MetaRow({
           key="automation"
           data-slot="automation-origin"
           title="Automations are off on this server (CEZ_AUTOMATIONS)"
-          className="rounded-sm border border-border bg-card px-1.5 py-px text-[11px] font-medium"
+          className="rounded-sm border border-border bg-card px-1.5 py-px text-meta font-medium"
         >
           Automation
         </span>
@@ -1198,7 +1207,7 @@ function AgentBadge({ run, continuationEngine }: { run: ApiRun; continuationEngi
         </DropdownMenuTrigger>
       </IconTooltip>
       <DropdownMenuContent align="end" className="min-w-[9rem]">
-        <DropdownMenuLabel className="font-mono text-[11px] font-normal text-muted-foreground">
+        <DropdownMenuLabel className="font-mono text-meta font-normal text-muted-foreground">
           runner: {runner}
         </DropdownMenuLabel>
         {/* Omitted, not guessed, when no step recorded one: a run from before accounts existed
@@ -1206,18 +1215,18 @@ function AgentBadge({ run, continuationEngine }: { run: ApiRun; continuationEngi
         {account ? (
           <DropdownMenuLabel
             data-slot="agent-badge-account"
-            className="font-mono text-[11px] font-normal text-muted-foreground"
+            className="font-mono text-meta font-normal text-muted-foreground"
           >
             account: {account}
           </DropdownMenuLabel>
         ) : null}
-        <DropdownMenuLabel className="font-mono text-[11px] font-normal text-muted-foreground">
+        <DropdownMenuLabel className="font-mono text-meta font-normal text-muted-foreground">
           model: {model}
         </DropdownMenuLabel>
         {identity ? (
           <DropdownMenuLabel
             data-slot="agent-badge-identity"
-            className="font-mono text-[11px] font-normal text-muted-foreground"
+            className="font-mono text-meta font-normal text-muted-foreground"
           >
             identity: {identity}
           </DropdownMenuLabel>
@@ -1225,7 +1234,7 @@ function AgentBadge({ run, continuationEngine }: { run: ApiRun; continuationEngi
         {continuationEngine ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="pb-1 text-[11px] font-normal text-muted-foreground">
+            <DropdownMenuLabel className="pb-1 text-meta font-normal text-muted-foreground">
               Next continuation
             </DropdownMenuLabel>
             <div
@@ -1262,7 +1271,7 @@ function GitStepAndKebab({
     <>
       {/* The one git button, top right. Desktop only: on phones it leads the menu instead. */}
       <span className="hidden md:contents">
-        <GitActions action={git.action} onAction={git.onAction} />
+        <GitActions action={git.action} pending={git.pending} onAction={git.onAction} />
       </span>
       <ActionsKebab run={run} actions={actions} git={git} showRunControls={showRunControls} />
       {git.dialogs}
@@ -1289,7 +1298,7 @@ function ActionsKebab({
 }) {
   const canTerminal = useCanOpenTerminal(run)
   const commands = buildTaskCommands(
-    { run, canResume: canTerminal, git: git.action, workspace: null, terminalAvailable: false, openChoices: [], taskUrl: '' },
+    { run, canResume: canTerminal, git: git.action, gitPending: git.pending, workspace: null, terminalAvailable: false, openChoices: [], taskUrl: '' },
     {
       markRead: () => actions.markRead.mutate(),
       markUnread: () => actions.markUnread.mutate(),
@@ -1367,6 +1376,11 @@ function ActionsKebab({
             {KEBAB_LABELS[command.id] ?? command.label}
           </DropdownMenuItem>
         ))}
+        {canRemoveTaskWorktree(run) ? (
+          <DropdownMenuItem disabled={actions.removeWorktree.isPending} onSelect={() => actions.setWorktreeRemovalOpen(true)}>
+            <FolderMinusIcon aria-hidden="true" /> Remove worktree…
+          </DropdownMenuItem>
+        ) : null}
         {stop || remove ? <DropdownMenuSeparator /> : null}
         {[stop, remove].map((command) =>
           command ? (
@@ -1400,7 +1414,7 @@ function ResumeHintLine({ hint }: { hint: string }) {
       data-slot="resume-hint"
       title="Copy the command"
       onClick={() => void copyToClipboard(hint, 'Command copied to clipboard.')}
-      className="mb-2 flex w-full min-w-0 items-center gap-1.5 rounded-sm px-1 py-0.5 text-left font-mono text-[11px] text-soft-foreground hover:bg-muted hover:text-foreground"
+      className="mb-2 flex w-full min-w-0 items-center gap-1.5 rounded-sm px-1 py-0.5 text-left font-mono text-meta text-soft-foreground hover:bg-muted hover:text-foreground"
     >
       <CopyIcon className="size-3 shrink-0" aria-hidden="true" />
       <span className="truncate">take over interactively: {hint}</span>

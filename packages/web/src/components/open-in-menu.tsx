@@ -76,8 +76,10 @@ const OPEN_IN_ICONS: Record<string, LucideIcon> = {
   codex: SparklesIcon,
   junie: BotIcon,
   opencode: BotIcon,
+  opencode2: BotIcon,
   pi: BotIcon,
   copilot: BotIcon,
+  antigravity: BotIcon,
   grok: BotIcon,
 }
 

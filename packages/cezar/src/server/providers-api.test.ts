@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   PROVIDER_IDS,
@@ -46,6 +46,13 @@ const CONNECTED_OUTPUT: Record<ProviderId, string> = {
     '●  Anthropic oauth',
     '└  1 credential',
   ].join('\n'),
+  // Same `opencode auth list` shape as OpenCode 1.x. The 2.x runner is a
+  // separate provider id that still speaks that CLI.
+  opencode2: [
+    '┌  Credentials ~/.local/share/opencode/auth.json',
+    '●  Anthropic oauth',
+    '└  1 credential',
+  ].join('\n'),
   cursor: JSON.stringify({
     status: 'authenticated',
     isAuthenticated: true,
@@ -59,6 +66,8 @@ const CONNECTED_OUTPUT: Record<ProviderId, string> = {
   // Copilot's probe drives its ACP server, so its "connected" evidence is the `session/new`
   // answer (`.ai/runs/2026-09-27-copilot-cli-runner/copilot-acp-notes.md`).
   copilot: '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"3f1b6f2e-0000-4000-8000-1f2e3d4c5b6a"}}',
+  // `agy models` lists the signed-in account's models (live agy 1.4.0 output).
+  antigravity: 'Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)',
   grok: 'You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n',
 };
 
@@ -66,6 +75,10 @@ const DISCONNECTED_OUTPUT: Record<ProviderId, string> = {
   claude: '{"loggedIn":false}',
   codex: 'Not logged in',
   opencode: [
+    '┌  Credentials ~/.local/share/opencode/auth.json',
+    '└  0 credentials',
+  ].join('\n'),
+  opencode2: [
     '┌  Credentials ~/.local/share/opencode/auth.json',
     '└  0 credentials',
   ].join('\n'),
@@ -77,11 +90,15 @@ const DISCONNECTED_OUTPUT: Record<ProviderId, string> = {
   junie: 'Junie version: 26.9.22 (3419.7)',
   copilot: '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Authentication required"}}',
   grok: 'You are not authenticated.',
+  antigravity: 'Please sign in',
 };
 
 const providerForExecutable = (executable: string): ProviderId => {
   if (executable === 'claude' || executable === 'codex' || executable === 'opencode' || executable === 'pi' || executable === 'junie' || executable === 'copilot' || executable === 'grok') return executable;
-  if (executable === 'agent') return 'cursor';
+  if (executable === 'agy') return 'antigravity';
+  // `resolveCursorAgentBin` prefers `cursor-agent` (on PATH or `~/.local/bin`) when the host has
+  // Cursor installed (#1503), so match it too or the suite fails only on such machines.
+  if (executable === 'agent' || basename(executable) === 'cursor-agent') return 'cursor';
   throw new Error(`unexpected executable: ${executable}`);
 };
 
@@ -209,10 +226,19 @@ describe('workspace provider API', () => {
           hint: 'Install OpenCode, then run `opencode auth login`.',
           enabled: true,
         },
+        // Both runners default to the `opencode` binary, so this fixture's
+        // not-installed answer for that executable covers OpenCode 2 as well.
+        {
+          provider: 'opencode2',
+          status: 'not-installed',
+          hint: 'Install OpenCode 2.x (https://opencode.ai), then run `opencode auth login`.',
+          enabled: true,
+        },
         { provider: 'cursor', status: 'connected', enabled: true },
         { provider: 'pi', status: 'connected', enabled: true },
         { provider: 'junie', status: 'connected', enabled: true },
         { provider: 'copilot', status: 'connected', enabled: true },
+        { provider: 'antigravity', status: 'connected', enabled: true },
         { provider: 'grok', status: 'connected', enabled: true },
       ],
     });
@@ -233,10 +259,12 @@ describe('workspace provider API', () => {
         { provider: 'claude', status: 'connected', enabled: true },
         { provider: 'codex', status: 'connected', enabled: true },
         { provider: 'opencode', status: 'connected', enabled: true },
+        { provider: 'opencode2', status: 'connected', enabled: true },
         { provider: 'cursor', status: 'connected', enabled: true },
         { provider: 'pi', status: 'connected', enabled: true },
         { provider: 'junie', status: 'connected', enabled: true },
         { provider: 'copilot', status: 'connected', enabled: true },
+        { provider: 'antigravity', status: 'connected', enabled: true },
         { provider: 'grok', status: 'connected', enabled: true },
       ],
     });
@@ -830,7 +858,7 @@ describe('workspace provider API', () => {
     });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: 'provider must be claude, codex, opencode, cursor, pi, copilot, or grok' });
+    expect(await response.json()).toEqual({ error: 'provider must be claude, codex, opencode, opencode2, cursor, pi, junie, copilot, antigravity, or grok' });
   });
 
   it('never places request-controlled text in the opened command', async () => {

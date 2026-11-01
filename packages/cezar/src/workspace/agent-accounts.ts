@@ -125,10 +125,12 @@ const selectionSchema = z
     claude: z.string().max(64).optional().catch(undefined),
     codex: z.string().max(64).optional().catch(undefined),
     opencode: z.string().max(64).optional().catch(undefined),
+    opencode2: z.string().max(64).optional().catch(undefined),
     cursor: z.string().max(64).optional().catch(undefined),
     pi: z.string().max(64).optional().catch(undefined),
     junie: z.string().max(64).optional().catch(undefined),
     copilot: z.string().max(64).optional().catch(undefined),
+    antigravity: z.string().max(64).optional().catch(undefined),
     grok: z.string().max(64).optional().catch(undefined),
   })
   .passthrough();

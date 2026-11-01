@@ -94,6 +94,8 @@ export const BACKEND_MODEL_MAP: Readonly<Record<AgentBackend, BackendModelMap>> 
   // opencode selects across providers, so a bare model is ambiguous: reject it
   // loudly rather than let the server pick a default the user never asked for.
   opencode: {},
+  // OpenCode 2.x uses the same provider/model wire form. A bare id is still ambiguous.
+  opencode2: {},
   // Cursor Agent CLI takes bare catalog ids on `--model` (`kimi-k3-low`,
   // `composer-2.5`). Discovery fills the picker; the default provider is only
   // the canonical-identity namespace (stripped again in toBackendModel).
@@ -119,6 +121,10 @@ export const BACKEND_MODEL_MAP: Readonly<Record<AgentBackend, BackendModelMap>> 
   // the run (#405's invariant). Rejecting a bare id the way opencode and pi do would reject the
   // only form Copilot accepts.
   copilot: { defaultProvider: 'github' },
+  // Antigravity's `--model` takes its own bare slugs (`gemini-3.8-flash-high`, `agy models`), and
+  // unknown ones fail loudly in the CLI. As with junie, the default provider names the backend
+  // so a bare slug resolves instead of being rejected as ambiguous.
+  antigravity: { defaultProvider: 'antigravity' },
   // Grok Build's `--model` takes a bare catalog id (`grok-4.7`). `xai` is the canonical-identity
   // namespace only: `toBackendModel` returns `id.model`, and an explicit foreign `foo/bar` is
   // rejected. Discovery fills the picker, so nothing dated is hardcoded here.

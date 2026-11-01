@@ -184,6 +184,8 @@ export function agentHomePaths(env: NodeJS.ProcessEnv = process.env): AgentHomeP
     cursor: env.CURSOR_CONFIG_DIR?.trim() || join(home, '.cursor'),
     copilot: env.COPILOT_HOME?.trim() || join(home, '.copilot'),
     junie: join(home, '.junie'),
+    antigravity: join(home, '.gemini', 'antigravity-cli'),
+    pi: env.PI_CODING_AGENT_DIR?.trim() || join(home, '.pi', 'agent'),
     // `$GROK_HOME` relocates Grok Build's files (default `~/.grok`). It does not isolate the
     // subscription login — see `PROFILE_ENV_VAR.grok`.
     grok: env.GROK_HOME?.trim() || join(home, '.grok'),

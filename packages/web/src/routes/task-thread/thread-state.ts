@@ -73,7 +73,7 @@ export interface ThreadAsk {
 export interface ThreadProviderAuthRequired {
   kind: 'provider-auth-required'
   id: string
-  provider: 'claude' | 'codex' | 'junie' | 'opencode' | 'cursor' | 'pi' | 'copilot' | 'grok'
+  provider: 'claude' | 'codex' | 'junie' | 'opencode' | 'opencode2' | 'cursor' | 'pi' | 'copilot' | 'antigravity' | 'grok'
   authFailureId: string
   /** The named agent account the rejection came from; absent for the default login. */
   profileId?: string
@@ -247,9 +247,11 @@ function providerId(value: unknown): ThreadProviderAuthRequired['provider'] | un
     value === 'codex' ||
     value === 'junie' ||
     value === 'opencode' ||
+    value === 'opencode2' ||
     value === 'cursor' ||
     value === 'pi' ||
     value === 'copilot' ||
+    value === 'antigravity' ||
     value === 'grok'
   )
     ? value

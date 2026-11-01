@@ -224,6 +224,7 @@ export const BACKEND_ALLOW_PREFIXES: Record<AgentBackend, readonly string[]> = {
   codex: ['OPENAI_', 'CODEX_', 'AZURE_OPENAI_'],
   cursor: ['CURSOR_'],
   opencode: MULTI_PROVIDER_PREFIXES,
+  opencode2: MULTI_PROVIDER_PREFIXES,
   // pi selects models as `provider/model` (#387), so it needs both its own config and any
   // provider a configured model id can name — the same set OpenCode gets, for the same reason.
   // Deliberately NOT `CLAUDE_`: pi is not Claude Code and reads none of its variables, and the
@@ -241,6 +242,12 @@ export const BACKEND_ALLOW_PREFIXES: Record<AgentBackend, readonly string[]> = {
   // it authenticates with (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`) are already forwarded to every
   // backend below, and `COPILOT_GITHUB_TOKEN` is covered by this prefix — so nothing else widens.
   copilot: ['COPILOT_'],
+  // Antigravity signs in through its own browser OAuth flow. It stores the token in the OS keyring
+  // (Secret Service over D-Bus on Linux) and, per its own changelog, BYPASSES the keyring when no
+  // `DBUS_SESSION_BUS_ADDRESS` is present — so without that one name a signed-in user looks signed
+  // out inside a run. The address is a socket path, not a secret. `XDG_RUNTIME_DIR` is already in
+  // the base list. No credential env var is documented, so `GEMINI_`/`GOOGLE_` keys stay out.
+  antigravity: ['ANTIGRAVITY_', 'DBUS_SESSION_BUS_ADDRESS'],
   // Subscription credentials live in `~/.grok/auth.json` (or `GROK_HOME`), not in the environment.
   // `XAI_` is the CLI's own fallback (`XAI_API_KEY`) when no session is saved — forwarded so that
   // fallback still works, never sent over ACP by cezar itself.

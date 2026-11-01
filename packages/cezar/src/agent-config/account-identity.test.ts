@@ -157,6 +157,7 @@ describe('readAccountIdentity', () => {
 
   it.each([
     ['opencode', 'OpenCode keeps its login outside its config folder, so cezar cannot read it.'],
+    ['opencode2', 'OpenCode 2 keeps its login outside its config folder, so cezar cannot read it.'],
     ['pi', 'cezar does not yet read Pi account details from its config folder.'],
     ['junie', 'cezar does not yet read Junie account details from its config folder.'],
     ['copilot', 'cezar does not yet read Copilot account details from its config folder.'],

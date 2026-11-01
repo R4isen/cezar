@@ -4,15 +4,17 @@ import type {
   WorkspaceUiState,
 } from '@open-mercato/cezar-api-client'
 
-const PROVIDERS: readonly ProviderId[] = ['claude', 'codex', 'junie', 'opencode', 'cursor', 'pi', 'copilot', 'grok']
+const PROVIDERS: readonly ProviderId[] = ['claude', 'codex', 'junie', 'opencode', 'opencode2', 'cursor', 'pi', 'copilot', 'antigravity', 'grok']
 export const PROVIDER_LABELS: Record<ProviderId, string> = {
   claude: 'Claude Code',
   codex: 'Codex',
   opencode: 'OpenCode',
+  opencode2: 'OpenCode 2',
   cursor: 'Cursor',
   pi: 'pi',
   junie: 'Junie',
   copilot: 'GitHub Copilot CLI',
+  antigravity: 'Antigravity',
   grok: 'Grok Build',
 }
 

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from './agent-runner.ts';
 import { ClaudeCliRunner } from './claude-cli-runner.ts';
+import { Opencode2ServerRunner } from './opencode2-server-runner.ts';
 import { OpencodeServerRunner } from './opencode-server-runner.ts';
 import { PiRunner } from './pi-runner.ts';
 
@@ -31,13 +32,13 @@ let stream;
 const info = ${JSON.stringify(costField)};
 const server = createServer((req, res) => {
   req.resume();
-  if (req.url === '/api/event') {
+  if (req.url === '/event') {
     stream = res;
     res.writeHead(200, {'content-type':'text/event-stream'});
     res.flushHeaders();
-  } else if (req.url === '/api/session') {
-    res.end(JSON.stringify({data:{id:'session-cost'}}));
-  } else if (req.url === '/api/session/session-cost/prompt') {
+  } else if (req.url === '/session') {
+    res.end(JSON.stringify({id:'session-cost'}));
+  } else {
     for (let i=0; i<2; i++) stream?.write('data: '+JSON.stringify({type:'message.updated',properties:{info:{id:'message-cost',role:'assistant',...info}}})+'\\n\\n');
     stream?.write('data: '+JSON.stringify({type:'session.idle',properties:{sessionID:'session-cost'}})+'\\n\\n');
     res.end(JSON.stringify(info));
@@ -55,6 +56,57 @@ process.stdin.once('data', () => {
       const Runner = backend === 'claude' ? ClaudeCliRunner : backend === 'pi' ? PiRunner : OpencodeServerRunner;
       const events: AgentEvent[] = [];
       await new Runner({ bin, timeoutMs: 5_000 }).run({ cwd: dir, userPrompt: 'report usage' }, (event) => events.push(event));
+      expect(events.filter((event) => event.type === 'error')).toEqual([]);
+      expect(events.filter((event) => event.type === 'cost').map((event) => event.usd)).toEqual(expected);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// OpenCode 2.x speaks `/api/*` and wraps the created session as `{ data: { id } }`.
+// The 1.x case above stays on `/session` and `{ id }`.
+describe('opencode2 reported cost', () => {
+  it.each([
+    { label: 'zero', cost: 0, expected: [0] },
+    { label: 'positive', cost: 0.125, expected: [0.125] },
+    { label: 'missing', cost: undefined, expected: [] },
+    { label: 'null', cost: null, expected: [] },
+    { label: 'negative', cost: -1, expected: [] },
+    { label: 'string', cost: '0', expected: [] },
+  ])('preserves $label without fabricating a report', async ({ cost, expected }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'cez-cost-wire-'));
+    const bin = join(dir, 'stub.mjs');
+    const costField = cost === undefined ? {} : { cost };
+    const info = JSON.stringify(costField);
+    const source = `
+import { createServer } from 'node:http';
+let stream;
+const info = ${info};
+const server = createServer((req, res) => {
+  req.resume();
+  const url = req.url ?? '';
+  if (url === '/api/event') {
+    stream = res;
+    res.writeHead(200, {'content-type':'text/event-stream'});
+    res.flushHeaders();
+  } else if (url === '/api/session') {
+    res.end(JSON.stringify({data:{id:'session-cost'}}));
+  } else if (url === '/api/session/session-cost/prompt') {
+    for (let i=0; i<2; i++) stream?.write('data: '+JSON.stringify({type:'message.updated',properties:{info:{id:'message-cost',role:'assistant',...info}}})+'\\n\\n');
+    stream?.write('data: '+JSON.stringify({type:'session.idle',properties:{sessionID:'session-cost'}})+'\\n\\n');
+    res.end(JSON.stringify(info));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+server.listen(0, '127.0.0.1', () => console.log('http://127.0.0.1:'+server.address().port));
+`;
+    writeFileSync(bin, '#!/usr/bin/env node\n' + source, { mode: 0o700 });
+    try {
+      const events: AgentEvent[] = [];
+      await new Opencode2ServerRunner({ bin, timeoutMs: 5_000 }).run({ cwd: dir, userPrompt: 'report usage' }, (event) => events.push(event));
       expect(events.filter((event) => event.type === 'error')).toEqual([]);
       expect(events.filter((event) => event.type === 'cost').map((event) => event.usd)).toEqual(expected);
     } finally {

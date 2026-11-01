@@ -16,6 +16,12 @@ export { cliTargetRunner }
 // Lives in `lib/` so shared components can use it without importing a route module.
 export { isRunActive }
 
+/** Reclaim keeps the task and branch; an in-place checkout never belongs to this action. */
+export function canRemoveTaskWorktree(run: RunRecord): boolean {
+  return !isRunActive(run.status) && run.worktree !== false && !!run.worktreePath
+    && !run.worktreeReclaimedAt && !run.worktreeLifecycle?.activeOperationId
+}
+
 /** The latest agent session across steps — what Continue/Terminal resume. */
 export function lastSessionId(run: RunRecord): string | undefined {
   return [...run.steps].reverse().find((step) => step.sessionId)?.sessionId
@@ -37,11 +43,13 @@ const RESUME_COMMAND_PREFIX: Record<Runner, string> = {
   claude: 'claude --resume',
   codex: 'codex resume',
   opencode: 'opencode --session',
+  opencode2: 'opencode --session',
   cursor: 'agent --resume',
   // Junie names the session by flag, not positionally — handled in resumeCommand.
   junie: 'junie --resume',
   pi: 'pi --session',
   copilot: 'copilot --resume',
+  antigravity: 'agy --conversation',
   grok: 'grok --resume',
 }
 
@@ -139,38 +147,53 @@ export function runActionFlags(run: RunRecord): RunActionFlags {
 }
 
 /**
- * The prompt behind the conflict chip's "Resolve conflicts" — the words the agent receives.
- *
- * It NAMES the pull request, and that is the load-bearing part: a task can point at several (the
- * PR it opened and the PR it is about, #901), each gets its own chip, and each chip's button sends
- * this. Without the number the agent would be told to resolve conflicts with no way to tell which
- * of them — and would pick, at even odds, the one the user was not looking at.
- *
- * Here rather than inline in the header for the reason every rule in this module is: it is text a
- * user will read in their own conversation, indistinguishable from something they typed — because
- * that is exactly what it is — and a test can pin it.
+ * What a git step says to the task's agent: the step's own name, nothing more — the agent knows how
+ * to commit, push, open a PR or merge a base branch, and the conversation shows exactly what was
+ * asked. The PR number rides along where a task can point at more than one PR (#901), and the base
+ * branch where the agent could not otherwise know it (a dispatch child, a non-default base).
  */
 export function resolveConflictsPrompt(prNumber?: number): string {
-  // No number is what a PR known only by URL looks like (`taskPrUrl`'s tolerance for a forge whose
-  // links do not end in one). "this pull request" is then the honest deixis: the conversation is
-  // the task's own, and it has exactly one such PR.
-  const where = prNumber ? `PR number ${prNumber}` : 'this pull request'
-  return `Merge head branch and resolve conflicts in ${where}`
+  return prNumber ? `Resolve conflicts in PR ${prNumber}` : 'Resolve conflicts'
 }
 
-/** The prompt behind "Fix errors" — the words the agent receives, like
- *  `resolveConflictsPrompt`: where to look, and that the fix must reach the PR. */
 export function fixChecksPrompt(prNumber?: number): string {
-  const where = prNumber ? `PR number ${prNumber}` : 'this pull request'
-  return `The CI checks on ${where} are failing. Look at the failing checks (gh pr checks, then gh run view --log-failed), fix the cause, then commit and push`
+  return prNumber ? `Fix failing checks in PR ${prNumber}` : 'Fix failing checks'
 }
 
-/** The prompt behind "Update branch": bring the task's branch up to date with its base, the way a
- *  person would — fetch, merge, resolve, verify, publish. `base` is the run's base branch. */
-export function updateBranchPrompt(base?: string): string {
+export function commitPrompt(andPush: boolean): string {
+  return andPush ? 'Commit and push' : 'Commit'
+}
+
+export function pushPrompt(): string {
+  return 'Push'
+}
+
+/** The base branch's name for a message — `origin/x` → `x`; nothing for none or a raw sha (a
+ *  detached fork point has no branch to target). The server's `--base` normalizes the same way. */
+function baseName(base?: string): string | undefined {
   const name = base?.replace(/^origin\//, '')
-  const target = name && !/^[0-9a-f]{7,40}$/i.test(name) ? `origin/${name}` : 'the base branch'
-  return `Update this branch with the latest ${target}: fetch, merge ${target} into it, resolve any conflicts, make sure it still builds and the tests pass, then commit and push`
+  return name && !/^[0-9a-f]{7,40}$/i.test(name) ? name : undefined
+}
+
+export function createPrPrompt(draft: boolean, base?: string): string {
+  const name = baseName(base)
+  return `${draft ? 'Create draft PR' : 'Create PR'}${name ? ` against ${name}` : ''}`
+}
+
+export function updateBranchPrompt(base?: string): string {
+  const name = baseName(base)
+  return name ? `Update branch from ${name}` : 'Update branch'
+}
+
+/** Create PR from an in-place task (spec 2026-10-20-trunk-based-projects): the work is uncommitted
+ *  in the checkout on the base branch, so the agent moves it to a branch and puts the checkout back. */
+export function inPlacePrPrompt(draft: boolean, base: string): string {
+  return `${draft ? 'Create draft PR' : 'Create PR'} against ${base} instead of landing: move these changes to a new branch, commit and push it, open the PR, then switch the checkout back to ${base}`
+}
+
+/** Update branch for an in-place task: bring the checkout up to date, keeping the task's changes. */
+export function inPlaceUpdatePrompt(base: string): string {
+  return `Update branch: pull the latest ${base} into the checkout (rebase, keeping these uncommitted changes)`
 }
 
 /** The Finish button's tooltip — review-gate accept reads differently from closing a session. */

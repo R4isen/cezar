@@ -52,9 +52,11 @@ const UNREADABLE = 'Could not read this account’s details.';
 /** Unsupported providers must each explain their own limitation; a new provider must add a row. */
 const UNSUPPORTED_IDENTITY_REASON: Record<Exclude<ProviderId, 'claude' | 'codex' | 'cursor'>, string> = {
   opencode: 'OpenCode keeps its login outside its config folder, so cezar cannot read it.',
+  opencode2: 'OpenCode 2 keeps its login outside its config folder, so cezar cannot read it.',
   pi: 'cezar does not yet read Pi account details from its config folder.',
   junie: 'cezar does not yet read Junie account details from its config folder.',
   copilot: 'cezar does not yet read Copilot account details from its config folder.',
+  antigravity: 'Antigravity keeps its Google sign-in in its own store, so cezar cannot read it.',
   grok: 'cezar does not yet read Grok account details.',
 };
 

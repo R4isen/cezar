@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 // Test-only mock of `opencode serve` — speaks just enough of the HTTP+SSE
 // API (§4 of agent-event-protocols.md) for the runner wiring test in
-// `opencode-ui-mapper.test.ts`: POST /api/session, GET /api/event (SSE bus), and
-// scripted prompt admissions. `MOCK_V2_EVENTS=1` emits the v2 execution stream.
+// `opencode-ui-mapper.test.ts`: POST /session, GET /event (SSE bus), one
+// scripted prompt turn. Deliberately reproduces the real server's ordering
+// quirk that motivates the v2 turn-end fix: the HTTP prompt response
+// resolves BEFORE the final SSE parts and the `session.idle` — so a correct
+// v2 stream must take `turn.completed` from `session.idle`, not from the
+// HTTP response.
 //
 // Four scripts, selected by a marker in the prompt text, so the #897 shapes
 // are reproducible without waiting five real minutes:
 //   (default)     the ordering quirk above — respond, then stream, then idle.
-//   `#drop-post`  destroy the prompt admission POST's socket WITHOUT a
+//   `#drop-post`  destroy the message POST's socket mid-turn WITHOUT a
 //                 response, keep streaming parts, send `session.idle` later.
 //                 This is what undici's 300 s headersTimeout/bodyTimeout did to
 //                 a long turn, from the client's point of view: the request is
@@ -16,12 +20,27 @@
 //                 a server whose turn boundary the runner has to synthesize.
 //   `#drop-then-die` destroy the message POST's socket AND then close the event
 //                 bus: the drop was real, and the runner has to say so.
+//   `#retry-limit` hold the POST open and report a `session.status` retry with a
+//                 spent-quota `action` and `next` hours away (`MOCK_RETRY_NEXT` pins it),
+//                 as a spent free tier does. `MOCK_RETRY_STATUS` (JSON) replaces the status
+//                 and `MOCK_RETRY_SESSION` the session it is reported for.
+//   `#retry-soon` report a retry due in 1 s with no `action`, then finish normally.
 //   `#permission <path>` ask `external_directory` for <path> and, like the
 //                 real server, finish the turn only once the prompt is answered;
 //                 the final text names the reply.
+//   `#question` ask via the native `question` tool (`question.asked`) and, like the
+//                 real server, finish the turn only once `POST /question/:id/reply`
+//                 (final text echoes the answers) or `/reject` arrives.
+//   `#question-free` the same, but with a free-text question that has no options.
+//   `#limit-cost` an assistant message that spent $0.02, then one a spent free tier rejects
+//                 (429 `FreeUsageLimitError`) yet still carries a $0.0005 `cost`.
+//   `#fail-cost`  the same, but the second message fails mid-stream (500): its cost is real.
 // `MOCK_LEGACY_PERMISSION=1` serves only the pre-rework session-scoped reply route.
 // `MOCK_NO_EVENT_BUS=1` in the environment makes `GET /event` 404 instead, for
 // the no-event-bus fallback.
+// `MOCK_START=silent` never prints the URL line; `MOCK_START=stderr` prints it on
+// stderr. `MOCK_PATH_DIR` overrides the `directory` `GET /path` reports.
+// `MOCK_API=v2` answers every non-`/api/` POST with 405, as OpenCode 2.x does.
 import { createServer } from 'node:http';
 
 const args = process.argv.slice(2);
@@ -34,7 +53,6 @@ const port = Number(arg('--port', '0'));
 
 const SESSION_ID = 'ses_mock_1';
 const MESSAGE_ID = 'msg_mock_1';
-const expectedAuthorization = `Basic ${Buffer.from(`${process.env.OPENCODE_SERVER_USERNAME}:${process.env.OPENCODE_SERVER_PASSWORD}`).toString('base64')}`;
 
 /** Turn 1 keeps the original ids (the golden wiring test pins them); later
  *  turns get their own message and part ids, as a real server would. */
@@ -46,6 +64,7 @@ let sse = null;
 /** The one prompt a turn is blocked on, and what answering it does. A single
  *  slot compared by id — never a lookup keyed by the request URL. */
 let pendingPermission = null;
+let pendingQuestion = null;
 const send = (event) => {
   if (sse) sse.write(`data: ${JSON.stringify(event)}\n\n`);
 };
@@ -63,89 +82,14 @@ const info = (extra) => ({
   ...extra,
 });
 
-function sendV2Turn(failed = false) {
-  const currentSuffix = suffix();
-  const assistantMessageID = `${MESSAGE_ID}_assistant${currentSuffix}`;
-  const event = (type, data) => send({ id: `evt_${turn}_${type}`, type, data });
-  event('session.execution.started', { sessionID: SESSION_ID });
-  event('session.step.started', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    agent: 'build',
-    model: { id: 'mock-model', providerID: 'mock' },
-  });
-  event('session.text.started', { sessionID: SESSION_ID, assistantMessageID, ordinal: 1 });
-  event('session.text.delta', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    ordinal: 1,
-    delta: 'Checking the working tree.',
-  });
-  event('session.text.ended', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    ordinal: 1,
-    text: 'Checking the working tree.',
-  });
-  event('session.tool.input.started', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    id: `call_mock_1${currentSuffix}`,
-    name: 'bash',
-  });
-  event('session.tool.called', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    id: `call_mock_1${currentSuffix}`,
-    name: 'bash',
-    input: { command: 'git status --short' },
-  });
-  event('session.tool.success', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    id: `call_mock_1${currentSuffix}`,
-    content: [{ type: 'text', text: ' M src/example.ts\n' }],
-    metadata: { exitCode: 0 },
-  });
-  event('session.text.started', { sessionID: SESSION_ID, assistantMessageID, ordinal: 2 });
-  event('session.text.delta', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    ordinal: 2,
-    delta: 'Done.',
-  });
-  event('session.text.ended', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    ordinal: 2,
-    text: 'Done.',
-  });
-  event('session.step.ended', {
-    sessionID: SESSION_ID,
-    assistantMessageID,
-    finish: 'stop',
-    cost: 0.0021,
-    tokens: { input: 1200, output: 300, reasoning: 0, cache: { read: 0, write: 0 } },
-  });
-  if (failed) {
-    event('session.execution.failed', {
-      sessionID: SESSION_ID,
-      error: { type: 'ProviderError', message: 'mock provider unavailable' },
-    });
-  } else {
-    event('session.execution.succeeded', { sessionID: SESSION_ID });
-  }
-}
-
 const server = createServer((req, res) => {
   const url = req.url ?? '';
-  if (req.headers.authorization !== expectedAuthorization) {
-    req.resume();
-    res.writeHead(401, { 'content-type': 'application/json' });
-    res.end('{"_tag":"UnauthorizedError","message":"Authentication required"}');
+  if (req.method === 'GET' && url === '/path') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ directory: process.env.MOCK_PATH_DIR ?? process.cwd() }));
     return;
   }
-  if (req.method === 'GET' && url.startsWith('/api/event')) {
+  if (req.method === 'GET' && url.startsWith('/event')) {
     if (process.env.MOCK_NO_EVENT_BUS === '1') {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('no event bus');
@@ -159,9 +103,15 @@ const server = createServer((req, res) => {
   let body = '';
   req.on('data', (chunk) => (body += chunk));
   req.on('end', () => {
-    if (req.method === 'POST' && url === '/api/session') {
+    // OpenCode 2.x serves its API under `/api` and answers the 1.x routes with 405.
+    if (process.env.MOCK_API === 'v2' && !url.startsWith('/api/')) {
+      res.writeHead(405);
+      res.end();
+      return;
+    }
+    if (req.method === 'POST' && url === '/session') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: { id: SESSION_ID, title: 'cezar task' } }));
+      res.end(JSON.stringify({ id: SESSION_ID, title: 'cezar task' }));
       return;
     }
     // The current reply route, or — under `MOCK_LEGACY_PERMISSION=1`, a server
@@ -195,12 +145,26 @@ const server = createServer((req, res) => {
       pending.finish(reply);
       return;
     }
+    const questionRoute = url.match(/^\/question\/([^/]+)\/(reply|reject)$/);
+    if (req.method === 'POST' && questionRoute) {
+      const pending = pendingQuestion?.id === questionRoute[1] ? pendingQuestion : null;
+      if (!pending) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      pendingQuestion = null;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('true');
+      pending.finish(questionRoute[2] === 'reject' ? 'rejected' : `answered ${body}`);
+      return;
+    }
     if (req.method === 'POST' && url === `/session/${SESSION_ID}/message`) {
       turn += 1;
       const MESSAGE_ID = messageId();
       const promptText = (() => {
         try {
-          return JSON.parse(body).text ?? '';
+          return JSON.parse(body).parts.map((p) => p.text ?? '').join('\n');
         } catch {
           return '';
         }
@@ -209,11 +173,53 @@ const server = createServer((req, res) => {
         ? 'drop-then-die'
         : promptText.includes('#drop-post')
           ? 'drop-post'
-          : promptText.includes('#tool-before-idle')
-            ? 'tool-before-idle'
-            : promptText.includes('#no-idle')
-              ? 'no-idle'
-              : 'default';
+          : promptText.includes('#no-idle')
+            ? 'no-idle'
+            : 'default';
+
+      if (promptText.includes('#http-error')) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ name: 'InternalError', data: { message: 'Provider rejected the configured model' } }));
+        return;
+      }
+
+      if (promptText.includes('#limit-cost') || promptText.includes('#fail-cost')) {
+        const limit = promptText.includes('#limit-cost');
+        const error = limit
+          ? { name: 'FreeUsageLimitError', data: { message: 'Rate limit exceeded. Please try again later.', statusCode: 429 } }
+          : { name: 'APIError', data: { message: 'upstream closed the stream', statusCode: 500 } };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ info: info({}), parts: [] }));
+        send({ type: 'message.updated', properties: { info: info({ cost: 0.02 }) } });
+        send({ type: 'message.updated', properties: { info: info({ id: `${messageId()}_b`, cost: 0.0205, error }) } });
+        setTimeout(() => send({ type: 'session.idle', properties: { sessionID: SESSION_ID } }), 50);
+        return;
+      }
+
+      if (promptText.includes('#question')) {
+        const id = `que_mock_${turn}`;
+        pendingQuestion = { id, finish: (what) => {
+          send({
+            type: 'message.part.updated',
+            properties: {
+              part: { id: `prt_que${suffix()}`, messageID: MESSAGE_ID, sessionID: SESSION_ID, type: 'text', text: `question ${what}`, time: { start: 1, end: 2 } },
+            },
+          });
+          setTimeout(() => send({ type: 'session.idle', properties: { sessionID: SESSION_ID } }), 20);
+        } };
+        send({ type: 'message.updated', properties: { info: info({}) } });
+        const options = promptText.includes('#question-free') ? [] : [
+          { label: 'Approach A', description: 'the quick one' },
+          { label: 'Approach B', description: 'the thorough one' },
+        ];
+        send({
+          type: 'question.asked',
+          properties: { id, sessionID: SESSION_ID, questions: [{ question: 'Which approach should I use?', header: 'Approach', options }] },
+        });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ info: info({}), parts: [] }));
+        return;
+      }
 
       const asked = promptText.match(/#permission (\S+)/);
       if (asked) {
@@ -240,24 +246,24 @@ const server = createServer((req, res) => {
           },
         });
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ data: { id: messageId(), sessionID: SESSION_ID, type: 'user', payload: { text: promptText }, delivery: 'steer' } }));
-        if (script === 'tool-before-idle') {
-          const delay = Number(process.env.MOCK_TOOL_IDLE_DELAY_MS ?? '5100');
-          setTimeout(() => send({
-            type: 'session.tool.called',
-            properties: { sessionID: SESSION_ID, callID: 'call_mock_1', tool: 'bash', input: { command: 'long-running task' } },
-          }), 20);
-          setTimeout(() => send({
-            type: 'session.tool.called',
-            properties: { sessionID: SESSION_ID, callID: 'call_mock_2', tool: 'bash', input: { command: 'follow-up task' } },
-          }), delay);
-          setTimeout(() => send({ type: 'session.idle', properties: { sessionID: SESSION_ID } }), delay + 50);
-          return;
-        }
-        setTimeout(() => sendV2Turn(promptText.includes('#execution-failed')), 20);
         res.end(JSON.stringify({ info: info({}), parts: [] }));
         return;
       }
+
+      const retryStatus = (extra) =>
+        send({
+          type: 'session.status',
+          properties: { sessionID: process.env.MOCK_RETRY_SESSION ?? SESSION_ID, status: { type: 'retry', attempt: 1, ...extra } },
+        });
+      if (promptText.includes('#retry-limit')) {
+        retryStatus(process.env.MOCK_RETRY_STATUS ? JSON.parse(process.env.MOCK_RETRY_STATUS) : {
+          message: 'Free usage exceeded, subscribe to Go',
+          action: { reason: 'free_tier_limit', provider: 'opencode', title: 'Free limit reached', message: 'Subscribe', label: 'subscribe' },
+          next: Number(process.env.MOCK_RETRY_NEXT) || Date.now() + 3 * 60 * 60_000,
+        });
+        return; // the POST stays open, like the real server's retry loop
+      }
+      if (promptText.includes('#retry-soon')) retryStatus({ message: 'Overloaded', next: Date.now() + 1_000 });
 
       // The other half of the #897 shape: the POST drops AND the session is
       // really gone. Swallowing the drop must not swallow this.
@@ -362,9 +368,10 @@ const server = createServer((req, res) => {
           info: info({ cost: 0.0021, tokens: { input: 1200, output: 300, reasoning: 0, cache: { read: 0, write: 0 } } }),
         },
       });
-      // V2 returns an admission receipt; execution continues over SSE.
+      // Respond to the prompt POST now — BEFORE the final text part and the
+      // idle signal, like the real server under streaming load.
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: { id: messageId(), sessionID: SESSION_ID, type: 'user', payload: { text: promptText }, delivery: 'steer' } }));
+      res.end(JSON.stringify({ info: info({ cost: 0.0021 }), parts: [] }));
       setTimeout(() => {
         send({
           type: 'message.part.updated',
@@ -385,13 +392,15 @@ const server = createServer((req, res) => {
       }
       return;
     }
-    res.writeHead(404, { 'content-type': 'application/json' });
+    res.writeHead(200, { 'content-type': 'application/json' });
     res.end('{}');
   });
 });
 
 server.listen(port, hostname, () => {
   // The runner reads the bound URL back from stdout, like the real server.
-  console.log(`opencode server listening on http://${hostname}:${server.address().port}`);
+  const line = `opencode server listening on http://${hostname}:${server.address().port}`;
+  if (process.env.MOCK_START === 'stderr') console.error(line);
+  else if (process.env.MOCK_START !== 'silent') console.log(line);
 });
 process.on('SIGTERM', () => process.exit(0));

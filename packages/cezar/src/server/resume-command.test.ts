@@ -21,8 +21,11 @@ describe('resumeCommand — session id validation', () => {
     expect(resumeCommand(undefined, id)).toBe(`claude --resume ${id}`);
     expect(resumeCommand('codex', id)).toBe(`codex resume ${id}`);
     expect(resumeCommand('opencode', id)).toBe(`opencode --session ${id}`);
+    // OpenCode 2 keeps the `opencode` binary. `CEZ_OPENCODE2_BIN` overrides it; `CEZ_OPENCODE_BIN` does not.
+    expect(resumeCommand('opencode2', id)).toBe(`opencode --session ${id}`);
     expect(resumeCommand('cursor', id)).toBe(`agent --resume ${id}`);
     expect(resumeCommand('pi', id)).toBe(`pi --session ${id}`);
+    expect(resumeCommand('antigravity', id)).toBe(`agy --conversation ${id}`);
     // Verified live (`junie --help`, 26.9.22): `--resume` alone reopens the last session; the
     // target is named by the separate `--session-id=<id>` flag, not a positional argument.
     expect(resumeCommand('junie', id)).toBe(`junie --resume --session-id=${id}`);
@@ -32,7 +35,7 @@ describe('resumeCommand — session id validation', () => {
   // would hand the user a `claude --resume` for a session claude does not own (#387). Cursor is
   // excluded from the generic `${runner} ` check: its CLI binary is `agent`, not `cursor` (the
   // specific assertion above covers it).
-  it.each(RUNNER_IDS.filter((runner) => runner !== 'cursor'))(
+  it.each(RUNNER_IDS.filter((runner) => runner !== 'cursor' && runner !== 'antigravity' && runner !== 'opencode2'))(
     'maps %s to its own CLI, never silently to claude',
     (runner) => {
       const id = '9f8e7d6c-1234-4abc-9def-0123456789ab';

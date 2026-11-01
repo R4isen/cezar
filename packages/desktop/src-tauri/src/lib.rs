@@ -19,8 +19,8 @@
 //! port wildcard (the cockpit's port is picked at launch), so the narrowing happens HERE: every
 //! command refuses a caller that is not the splash or the cockpit on the port this shell
 //! spawned (`caller_is_trusted`) — the failure page's `restart_app` and `send_error_report` the
-//! splash alone (`caller_is_splash`) — and the window itself never navigates to another local server
-//! (`is_own_origin`). A dev server on `localhost:3000` is somebody else's page.
+//! splash alone (`caller_is_splash`) — and the window itself never stays on another local server
+//! (`is_own_origin`, enforced at page load: the navigation hook also sees the Preview's iframes). A dev server on `localhost:3000` is somebody else's page.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -71,6 +71,8 @@ struct Shell {
     supervising: AtomicBool,
     /// Set once the failure page's "Restart cezar" is under way; a second click does nothing.
     restarting: AtomicBool,
+    /// The last page of ours the window finished loading — where it returns after a foreign page.
+    cockpit_url: Mutex<Option<url::Url>>,
 }
 
 /// Runs at document start on EVERY page the window loads — the splash and, after navigation,
@@ -80,7 +82,9 @@ struct Shell {
 const INIT_SCRIPT: &str = r#"
   (function () {
     var platform = "__PLATFORM__";
-    window.__CEZ_DESKTOP__ = { platform: platform };
+    // `microphone`: this shell is entitled to it — an older macOS one refuses every dictation
+    // (telemetry c55c7b0b), so the cockpit disables the mic there instead.
+    window.__CEZ_DESKTOP__ = { platform: platform, microphone: true };
     // At document start the root element may not exist yet; the flag is a convenience, the
     // rest of this script is not.
     if (document.documentElement) document.documentElement.dataset.cezDesktop = platform;
@@ -195,6 +199,45 @@ const INIT_SCRIPT: &str = r#"
   })();
 "#;
 
+/// Runs in every frame; acts only in a DIRECT child of the cockpit — the task Preview's page. It
+/// reports where that page is after it moves without a load (`pushState`, `replaceState`, a hash
+/// change), so the Preview's address bar and Reload follow it. Same protocol as the Design Mode
+/// picker's copy (`packages/cezar/src/server/preview/location-reporter.ts`); it only reports,
+/// to the parent's own origin, and only when that parent is a cockpit origin.
+const FRAME_SCRIPT: &str = r#"
+  (function () {
+    if (window.parent === window || window.parent !== window.top || window.__cezarLocation) return;
+    var ancestors = location.ancestorOrigins;
+    var parentOrigin = ancestors && ancestors.length > 0 ? ancestors[0] : null;
+    if (!parentOrigin || !/^(https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?|tauri:\/\/localhost|https?:\/\/tauri\.localhost)$/.test(parentOrigin)) return;
+    window.__cezarLocation = true;
+    var last = null;
+    var length = history.length;
+    function report(how) {
+      var url = location.href;
+      if (url === last) return;
+      last = url;
+      length = history.length;
+      try { window.parent.postMessage({ source: 'cezar-preview', type: 'location', url: url, how: how }, parentOrigin); } catch (e) {}
+    }
+    function wrap(name, how) {
+      var original = history[name];
+      if (typeof original !== 'function') return;
+      history[name] = function () {
+        var result = original.apply(this, arguments);
+        report(how);
+        return result;
+      };
+    }
+    wrap('pushState', 'push');
+    wrap('replaceState', 'replace');
+    function moved() { report(history.length > length ? 'push' : 'pop'); }
+    window.addEventListener('popstate', moved);
+    window.addEventListener('hashchange', moved);
+    report('load');
+  })();
+"#;
+
 fn platform_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
@@ -207,6 +250,7 @@ fn platform_name() -> &'static str {
 
 fn build_main_window(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<WebviewWindow> {
     let shell_for_navigation = shell.clone();
+    let shell_for_page_load = shell.clone();
     let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Cezar")
         .inner_size(1360.0, 900.0)
@@ -216,6 +260,10 @@ fn build_main_window(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<Webvi
         // default size and position before jumping to where the user left it.
         .visible(false)
         .initialization_script(INIT_SCRIPT.replace("__PLATFORM__", platform_name()))
+        .initialization_script_for_all_frames(FRAME_SCRIPT)
+        // The cockpit's own drag-and-drop (view tabs onto the workspace, column headers, files into
+        // the composer) is HTML5; Tauri's native file-drop handler swallows those events on macOS.
+        .disable_drag_drop_handler()
         // One window, on purpose. Anything that asks for another — `target="_blank"` links (the
         // cockpit's PR and tracker links), `window.open`, the context menu's "Open Link in New
         // Window" — goes to the default browser instead of silently doing nothing.
@@ -223,15 +271,32 @@ fn build_main_window(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<Webvi
             open_url(url.as_str());
             tauri::webview::NewWindowResponse::Deny
         })
-        // Same-window navigation stays inside the cockpit (and the splash); a link to anywhere
-        // else — another server on this machine included — is handed to the browser. The shell
-        // is the cockpit, not a general browser, and a page it shows holds its IPC grants.
+        // wry asks this for EVERY frame on macOS and Linux, with no way to tell which one — so a
+        // web address must pass here, or the task Preview's iframe can never load. A web page
+        // reaching the WINDOW itself is caught at `on_page_load` below instead.
         .on_navigation(move |url| {
-            if is_own_origin(url, shell_for_navigation.port.load(Ordering::SeqCst)) {
+            if is_own_origin(url, shell_for_navigation.port.load(Ordering::SeqCst)) || may_be_a_frame(url) {
                 return true;
             }
             open_url(url.as_str());
             false
+        })
+        // Main frame only. The window stays the cockpit (and the splash): any other page —
+        // another server on this machine included — is handed to the browser and the window goes
+        // back to where it was. The shell is not a general browser.
+        .on_page_load(move |window, payload| {
+            let url = payload.url();
+            if is_own_origin(url, shell_for_page_load.port.load(Ordering::SeqCst)) {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                    *shell_for_page_load.cockpit_url.lock().unwrap() = Some(url.clone());
+                }
+                return;
+            }
+            open_url(url.as_str());
+            let back = shell_for_page_load.cockpit_url.lock().unwrap().clone();
+            if let Some(back) = back.or_else(|| url::Url::parse(app_origin()).ok()) {
+                let _ = window.navigate(back);
+            }
         });
     // macOS: no title text; the traffic lights keep their NATIVE placement (a standard title bar
     // is 28pt tall and puts them at the system offset) and float over the 28px band the cockpit
@@ -447,11 +512,13 @@ fn update_cezar_command(app: AppHandle, window: WebviewWindow, shell: tauri::Sta
 }
 
 /// semver-ish ordering for what cezar publishes (`0.11.1`, `0.11.1-nightly.20260924.49`):
-/// numeric core, a release above any prerelease of the same core, then identifiers.
+/// numeric core, a release above any prerelease of the same core, then identifiers. A
+/// checkout's `0.15.2-dev` (#1530, display only) reads as its release, never as older.
 fn version_newer(candidate: &str, current: &str) -> bool {
     fn parse(raw: &str) -> Option<([u64; 3], Vec<String>)> {
         let raw = raw.trim().trim_start_matches('v').split('+').next()?;
         let (core, pre) = match raw.split_once('-') {
+            Some((core, "dev")) => (core, Vec::new()),
             Some((core, pre)) => (core, pre.split('.').map(str::to_owned).collect::<Vec<_>>()),
             None => (raw, Vec::new()),
         };
@@ -563,6 +630,7 @@ pub fn run() {
         update_available: Mutex::new(None),
         supervising: AtomicBool::new(false),
         restarting: AtomicBool::new(false),
+        cockpit_url: Mutex::new(None),
     });
     let shell_for_setup = shell.clone();
     let shell_for_menu = shell.clone();
@@ -765,12 +833,12 @@ fn supervise(app: AppHandle, shell: Arc<Shell>) {
         if let Some(item) = shell.open_item.lock().unwrap().as_ref() {
             let _ = item.set_enabled(true);
         }
-        let cwd = pick_cwd();
+        let project = pick_project();
         refresh_versions_menu(&app, &shell);
         splash_reset(&window, "Starting cezar…", &entry.to_string_lossy());
 
         let log: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let mut child = match spawn_sidecar(&entry, port, &cwd, log.clone()) {
+        let mut child = match spawn_sidecar(&entry, port, project.as_deref(), log.clone()) {
             Ok(child) => child,
             Err(error) => {
                 fail(&window, "cezar could not start", &error, "", Some(Failure::new("sidecar_spawn_failed", &error)));
@@ -848,8 +916,7 @@ fn supervise(app: AppHandle, shell: Arc<Shell>) {
             }
             Some(code) => {
                 let tail = log.lock().unwrap().iter().cloned().collect::<Vec<_>>().join("\n");
-                let failure = Failure::new("sidecar_exited", format!("The cockpit process exited with status {code}.")).with("exit_code", code);
-                fail(&window, "cezar stopped", &format!("The cockpit process exited with status {code}."), &tail, Some(failure));
+                fail(&window, "cezar stopped", &stopped_detail(code), &tail, stopped_failure(code));
                 return;
             }
             None => return,
@@ -1194,10 +1261,13 @@ fn channel_tag(channel: Option<&str>) -> Option<&'static str> {
 
 // ---- process -------------------------------------------------------------------------------
 
-fn spawn_sidecar(entry: &Path, port: u16, cwd: &Path, log: Arc<Mutex<VecDeque<String>>>) -> Result<Child, String> {
-    let mut command = tool_command(&node_program(), &[&entry.to_string_lossy(), "serve", "--no-open", "--port", &port.to_string()]);
+fn spawn_sidecar(entry: &Path, port: u16, project: Option<&Path>, log: Arc<Mutex<VecDeque<String>>>) -> Result<Child, String> {
+    let args = sidecar_args(entry, port, project);
+    let mut command = tool_command(&node_program(), &args.iter().map(String::as_str).collect::<Vec<_>>());
     command
-        .current_dir(cwd)
+        // Never the project itself: on macOS a project under Desktop/Documents/Downloads the app may
+        // not read fails getcwd, and cezar exited 1 before answering (telemetry 5af5aec6).
+        .current_dir(home_dir())
         .env("CEZ_DESKTOP", "1")
         .env("CEZ_SUPERVISED", "1")
         // cezar polls this pid and exits when it is gone — a force-quit of the shell never
@@ -1721,6 +1791,12 @@ fn is_own_origin(url: &url::Url, port: u16) -> bool {
     }
 }
 
+/// What an iframe of the cockpit may load — the task Preview frames any web page. Everything
+/// else (`mailto:`, `file:`, …) is the browser's or the OS's to open.
+fn may_be_a_frame(url: &url::Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "about" | "blob" | "data")
+}
+
 /// The guard every IPC command starts with: the page asking must be one of ours. The capability
 /// cannot express this (it grants loopback on any port), so the commands do.
 fn caller_is_trusted(window: &WebviewWindow, shell: &Shell) -> bool {
@@ -1897,19 +1973,28 @@ fn resolve_entry() -> Option<PathBuf> {
     managed_entry(&cezar_home().join("versions"))
 }
 
+/// `serve` on `port`, booting into `project` through `--repo` (the sidecar's cwd is always home).
+fn sidecar_args(entry: &Path, port: u16, project: Option<&Path>) -> Vec<String> {
+    let mut args = vec![entry.to_string_lossy().into_owned(), "serve".into(), "--no-open".into(), "--port".into(), port.to_string()];
+    if let Some(project) = project {
+        args.push("--repo".into());
+        args.push(project.to_string_lossy().into_owned());
+    }
+    args
+}
+
 /// The boot folder: `CEZ_DESKTOP_CWD`, else the most recently opened registered project, else
-/// the home directory (which cezar never registers as a project — the cockpit then shows the
-/// registry).
-fn pick_cwd() -> PathBuf {
+/// none — cezar boots in the home directory, which it never registers as a project, and the
+/// cockpit shows the registry.
+fn pick_project() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("CEZ_DESKTOP_CWD").map(PathBuf::from) {
         if explicit.is_dir() {
-            return explicit;
+            return Some(explicit);
         }
     }
     let config = cezar_home().join("config.json");
-    let fallback = home_dir();
-    let Ok(raw) = std::fs::read_to_string(config) else { return fallback };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else { return fallback };
+    let raw = std::fs::read_to_string(config).ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
     let mut best: Option<(String, PathBuf)> = None;
     if let Some(projects) = json.get("projects").and_then(|value| value.as_array()) {
         for project in projects {
@@ -1924,7 +2009,7 @@ fn pick_cwd() -> PathBuf {
             }
         }
     }
-    best.map(|(_, path)| path).unwrap_or(fallback)
+    best.map(|(_, path)| path)
 }
 
 /// Debug builds with `CEZ_DESKTOP_DEBUG_IPC=1`: after the cockpit loads, exercise the two
@@ -2012,6 +2097,21 @@ fn fail(window: &WebviewWindow, title: &str, detail: &str, log: &str, failure: O
     }
 }
 
+/// cezar exits 0 only through its own graceful shutdown — a SIGINT or SIGTERM from outside the
+/// shell. That is a stop someone asked for, not a crash: the page still offers a restart, but no
+/// error report (telemetry f3893dd3).
+fn stopped_detail(code: i32) -> String {
+    if code == 0 {
+        "The cockpit process was stopped from outside the app (it shut down cleanly).".into()
+    } else {
+        format!("The cockpit process exited with status {code}.")
+    }
+}
+
+fn stopped_failure(code: i32) -> Option<Failure> {
+    (code != 0).then(|| Failure::new("sidecar_exited", stopped_detail(code)).with("exit_code", code))
+}
+
 /// The page's `report` mode, after adding what only the shell knows: the active cezar and where
 /// Node came from.
 fn report_param(failure: Option<Failure>, log: &str) -> &'static str {
@@ -2062,15 +2162,39 @@ mod tests {
         url::Url::parse(raw).unwrap()
     }
 
-    /// The legacy inset rule matches `div`s under the app shell, and the strip and the row this
-    /// script adds ARE `div`s under the app shell. Inset too, the row pushed the version chip
-    /// onto the brand row (shell 0.1.1).
+    /// The boot project rides `--repo`, never the cwd: a cwd the app may not read made cezar
+    /// exit 1 before answering (telemetry 5af5aec6).
+    #[test]
+    fn the_sidecar_boots_its_project_through_repo() {
+        let entry = Path::new("/c/index.js");
+        assert_eq!(sidecar_args(entry, 4321, None), ["/c/index.js", "serve", "--no-open", "--port", "4321"]);
+        assert_eq!(
+            sidecar_args(entry, 4321, Some(Path::new("/Users/o/Documents/my app"))),
+            ["/c/index.js", "serve", "--no-open", "--port", "4321", "--repo", "/Users/o/Documents/my app"]
+        );
+    }
+
+    #[test]
+    fn a_clean_exit_is_a_stop_not_an_error_report() {
+        assert!(stopped_failure(0).is_none());
+        let failure = stopped_failure(1).expect("a non-zero exit is reported");
+        assert_eq!(failure.code, "sidecar_exited");
+        assert_eq!(failure.message, "The cockpit process exited with status 1.");
+    }
+
     #[test]
     fn the_development_channel_follows_no_dist_tag() {
         assert_eq!(channel_tag(Some("development")), None);
         assert_eq!(channel_tag(Some("nightly")), Some("nightly"));
         assert_eq!(channel_tag(Some("stable")), Some("latest"));
         assert_eq!(channel_tag(None), Some("latest"));
+    }
+
+    #[test]
+    fn a_checkout_dev_version_is_not_older_than_its_release() {
+        assert!(!version_newer("0.15.2", "0.15.2-dev"));
+        assert!(version_newer("0.15.3", "0.15.2-dev"));
+        assert!(version_newer("0.15.2", "0.15.2-nightly.20261019.4"));
     }
 
     #[test]
@@ -2088,6 +2212,23 @@ mod tests {
         assert!(switcher_has_choices(2));
     }
 
+    #[test]
+    fn the_bundle_may_use_the_microphone_it_advertises() {
+        // telemetry c55c7b0b: hardened runtime + no usage strings = every dictation `not-allowed`.
+        let dir = env!("CARGO_MANIFEST_DIR");
+        let read = |name: &str| std::fs::read_to_string(format!("{dir}/{name}")).unwrap();
+        let conf: serde_json::Value = serde_json::from_str(&read("tauri.conf.json")).unwrap();
+        let entitlements = conf["bundle"]["macOS"]["entitlements"].as_str().unwrap();
+        assert!(read(entitlements).contains("com.apple.security.device.audio-input"));
+        let info = read("Info.plist");
+        assert!(info.contains("NSMicrophoneUsageDescription"));
+        assert!(info.contains("NSSpeechRecognitionUsageDescription"));
+        assert!(INIT_SCRIPT.contains("microphone: true"));
+    }
+
+    /// The legacy inset rule matches `div`s under the app shell, and the strip and the row this
+    /// script adds ARE `div`s under the app shell. Inset too, the row pushed the version chip
+    /// onto the brand row (shell 0.1.1).
     #[test]
     fn the_legacy_inset_spares_what_the_shell_adds() {
         let rule = INIT_SCRIPT.split("padding-top:28px!important").next().unwrap();
@@ -2127,6 +2268,17 @@ mod tests {
         assert!(!is_own_origin(&url("https://example.com/"), 4321));
         // No sidecar yet: nothing on loopback is trusted.
         assert!(!is_own_origin(&url("http://127.0.0.1:4321/"), 0));
+    }
+
+    /// The Preview's iframe goes through the navigation hook too; refusing it there left every
+    /// framed dev server blank in the app while it worked in a browser.
+    #[test]
+    fn a_frame_may_load_any_web_page_but_not_other_schemes() {
+        assert!(may_be_a_frame(&url("http://localhost:5177/#1")));
+        assert!(may_be_a_frame(&url("https://example.com/")));
+        assert!(may_be_a_frame(&url("about:blank")));
+        assert!(!may_be_a_frame(&url("mailto:someone@example.com")));
+        assert!(!may_be_a_frame(&url("file:///etc/passwd")));
     }
 
     #[test]
@@ -2434,7 +2586,8 @@ mod tests {
     }
 
     /// The sidecar's whole launch: node is started with the entry and the arguments cezar
-    /// expects, in the right folder and environment, and its health answers on the port.
+    /// expects, the project as `--repo` (not the cwd), the right environment, and its health
+    /// answers on the port.
     #[test]
     #[ignore = "needs Node.js on PATH"]
     fn starts_a_sidecar_and_hears_its_health() {
@@ -2446,7 +2599,8 @@ mod tests {
             r#"const args = process.argv.slice(2);
 const port = Number(args[args.indexOf('--port') + 1]);
 const ok = args[0] === 'serve' && args.includes('--no-open') && process.env.CEZ_DESKTOP === '1'
-  && process.env.CEZ_SUPERVISED === '1' && Number(process.env.CEZ_SUPERVISOR_PID) > 0;
+  && process.env.CEZ_SUPERVISED === '1' && Number(process.env.CEZ_SUPERVISOR_PID) > 0
+  && require('node:fs').realpathSync(args[args.indexOf('--repo') + 1]) === __dirname && process.cwd() !== __dirname;
 require('node:http').createServer((req, res) => {
   res.writeHead(ok ? 200 : 500, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ version: '9.9.9-test' }));
@@ -2456,7 +2610,7 @@ require('node:http').createServer((req, res) => {
         .unwrap();
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let log = Arc::new(Mutex::new(VecDeque::new()));
-        let mut child = spawn_sidecar(&entry, port, &scratch.0, log.clone()).expect("node starts");
+        let mut child = spawn_sidecar(&entry, port, Some(&scratch.0), log.clone()).expect("node starts");
         let version = wait_for_health(port, &mut child, Duration::from_secs(20));
         let _ = child.kill();
         let _ = child.wait();

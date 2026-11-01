@@ -142,10 +142,12 @@ const RUNNER_LABEL: Record<RunnerId, string> = {
   claude: 'Claude',
   codex: 'Codex',
   opencode: 'OpenCode',
+  opencode2: 'OpenCode 2',
   cursor: 'Cursor',
   pi: 'pi',
   junie: 'Junie',
   copilot: 'GitHub Copilot',
+  antigravity: 'Antigravity',
   grok: 'Grok',
 };
 

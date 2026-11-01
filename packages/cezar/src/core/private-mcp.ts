@@ -14,7 +14,7 @@ import type { RunnerId } from './agent-runner.ts';
  *
  *  - `claude`   — `--mcp-config <0600 temp file>` (additive to the repo's MCP config);
  *  - `codex`    — `thread/start|resume` `config` overrides, one `mcp_servers.<name>` key each;
- *  - `opencode` — `OPENCODE_CONFIG_CONTENT` (loaded after the project config, so it wins);
+ *  - `opencode`, `opencode2` — `OPENCODE_CONFIG_CONTENT` (loaded after the project config, so it wins);
  *  - `junie`, `copilot` — ACP `session/new|load` `mcpServers`.
  *
  * `cursor` and `pi` have no launch-time MCP channel; a run on them gets a note instead.
@@ -45,7 +45,7 @@ export interface PrivateMcpServer {
 }
 
 /** The runners that can take private MCP servers at launch. */
-export const PRIVATE_MCP_RUNNERS: readonly RunnerId[] = ['claude', 'codex', 'opencode', 'junie', 'copilot'];
+export const PRIVATE_MCP_RUNNERS: readonly RunnerId[] = ['claude', 'codex', 'opencode', 'opencode2', 'junie', 'copilot'];
 
 export function supportsPrivateMcp(runner: string): boolean {
   return (PRIVATE_MCP_RUNNERS as readonly string[]).includes(runner);

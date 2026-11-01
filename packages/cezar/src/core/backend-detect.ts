@@ -1,16 +1,20 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveCursorAgentBin } from './cursor-agent-runner.ts';
+import { resolveAntigravityBin } from './antigravity-runner.ts';
+import { isForeignCursorAgent } from './cursor-bin.ts';
+import { cliVersionFrom } from './provider-auth.ts';
 import { resolveClaudeBin } from './claude-bin.ts';
+import { ghEnv } from './gh-env.ts';
 import { spawnableCommand } from './windows-shim.ts';
 
 const execAsync = promisify(execFile);
 /** Every probe goes through `spawnableCommand`, so a Windows `.cmd` override is detected too. */
-const exec = (bin: string, args: readonly string[], opts: { timeout: number }) =>
+const exec = (bin: string, args: readonly string[], opts: { timeout: number; env?: NodeJS.ProcessEnv }) =>
   execAsync(...spawnableCommand(bin, args), opts);
 
 export interface BackendCheck {
-  name: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'junie' | 'copilot' | 'grok' | 'gh' | 'git';
+  name: 'claude' | 'codex' | 'opencode' | 'opencode2' | 'cursor' | 'pi' | 'junie' | 'copilot' | 'antigravity' | 'grok' | 'gh' | 'git';
   available: boolean;
   version?: string;
   hint?: string;
@@ -18,7 +22,7 @@ export interface BackendCheck {
 
 /**
  * Probe the host for everything cez leans on: the agent CLIs (`claude`, and
- * the optional `codex` / `opencode` / `cursor` / `pi` / `junie` / `copilot` / `grok`
+ * the optional `codex` / `opencode` / `cursor` / `pi` / `junie` / `copilot` / `agy` / `grok`
  * alternatives), `gh` (GitHub auth for PR creation) and `git`. Nothing is required except at
  * least one agent CLI — the GUI degrades gracefully, only offers the
  * runners that are present, and shows the hints for the rest.
@@ -28,9 +32,11 @@ export async function detectEnvironment(): Promise<BackendCheck[]> {
     probeClaude(),
     probeCodex(),
     probeOpencode(),
+    probeOpencode2(),
     probeCursor(),
     probePi(),
     probeJunie(),
+    probeAntigravity(),
     probeCopilot(),
     probeGrok(),
     probeGh(),
@@ -116,6 +122,25 @@ async function probeOpencode(): Promise<BackendCheck> {
   }
 }
 
+async function probeOpencode2(): Promise<BackendCheck> {
+  const bin = process.env.CEZ_OPENCODE2_BIN ?? 'opencode';
+  try {
+    const { stdout } = await exec(bin, ['--version'], { timeout: 10_000 });
+    return {
+      name: 'opencode2',
+      available: true,
+      version: stdout.trim(),
+      hint: 'OpenCode 2.x runner. If no provider is configured, run `opencode` once to set one up',
+    };
+  } catch {
+    return {
+      name: 'opencode2',
+      available: false,
+      hint: 'optional: install OpenCode 2.x (https://opencode.ai) to use the OpenCode 2 runner',
+    };
+  }
+}
+
 async function probeCursor(): Promise<BackendCheck> {
   if (process.env.CEZ_DRY_RUN === '1') {
     return { name: 'cursor', available: true, version: 'mock (CEZ_DRY_RUN=1)' };
@@ -123,6 +148,14 @@ async function probeCursor(): Promise<BackendCheck> {
   const bin = resolveCursorAgentBin();
   try {
     const { stdout } = await exec(bin, ['--version'], { timeout: 10_000 });
+    // Cursor absent, another `agent` on PATH (telemetry 8d304c50) — don't offer a runner that can't run.
+    if (isForeignCursorAgent(bin, cliVersionFrom(stdout))) {
+      return {
+        name: 'cursor',
+        available: false,
+        hint: `\`${bin}\` resolves but doesn't look like the Cursor CLI (got: ${stdout.trim().slice(0, 80)}); install it (curl https://cursor.com/install -fsS | bash) or set CEZ_CURSOR_AGENT_BIN`,
+      };
+    }
     return {
       name: 'cursor',
       available: true,
@@ -194,6 +227,40 @@ async function probeJunie(): Promise<BackendCheck> {
   }
 }
 
+async function probeAntigravity(): Promise<BackendCheck> {
+  // Dry-run stands the runner up on the shared mock, so report it present.
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { name: 'antigravity', available: true, version: 'mock (CEZ_DRY_RUN=1)' };
+  }
+  const bin = resolveAntigravityBin();
+  try {
+    // `--version` needs no login and no network — the auth state is provider-auth.ts's job.
+    const { stdout } = await exec(bin, ['--version'], { timeout: 10_000 });
+    const version = stdout.trim();
+    // agy prints a bare semver ("1.4.0"); anything else is another program that happens to be
+    // called `agy` on PATH.
+    if (version && !/^v?\d+\.\d+/.test(version)) {
+      return {
+        name: 'antigravity',
+        available: false,
+        hint: `\`${bin}\` resolves but doesn't look like the Antigravity CLI (got: ${version.slice(0, 80)})`,
+      };
+    }
+    return {
+      name: 'antigravity',
+      available: true,
+      version: version || 'installed',
+      hint: 'if not authenticated, run `agy` once and sign in with your Google account',
+    };
+  } catch {
+    return {
+      name: 'antigravity',
+      available: false,
+      hint: 'optional: install the Antigravity CLI (https://antigravity.google/docs/cli) and sign in with `agy` to use the Antigravity runner',
+    };
+  }
+}
+
 async function probeCopilot(): Promise<BackendCheck> {
   // Dry-run stands the runner up on the shared mock, so report it present.
   if (process.env.CEZ_DRY_RUN === '1') {
@@ -254,7 +321,7 @@ async function probeGrok(): Promise<BackendCheck> {
 
 async function probeGh(): Promise<BackendCheck> {
   try {
-    const { stdout } = await exec('gh', ['auth', 'token'], { timeout: 10_000 });
+    const { stdout } = await exec('gh', ['auth', 'token'], { timeout: 10_000, env: ghEnv() });
     return { name: 'gh', available: stdout.trim().length > 0, version: 'authenticated' };
   } catch {
     return {
@@ -277,7 +344,7 @@ async function probeGit(): Promise<BackendCheck> {
 /** The host's GitHub token: logged-in `gh` first, `GITHUB_TOKEN` fallback. */
 export async function readHostGithubToken(): Promise<string | null> {
   try {
-    const { stdout } = await exec('gh', ['auth', 'token'], { timeout: 10_000 });
+    const { stdout } = await exec('gh', ['auth', 'token'], { timeout: 10_000, env: ghEnv() });
     const token = stdout.trim();
     if (token) return token;
   } catch {

@@ -1,6 +1,7 @@
 import { RUNNER_IDS, type RunnerId } from '../core/agent-runner.ts';
 import { claudeModelSettingsStrategy } from './model-settings/claude.ts';
 import { codexModelSettingsStrategy } from './model-settings/codex.ts';
+import { antigravityModelSettingsStrategy } from './model-settings/antigravity.ts';
 import { junieModelSettingsStrategy } from './model-settings/junie.ts';
 import { copilotModelSettingsStrategy } from './model-settings/copilot.ts';
 import { grokModelSettingsStrategy } from './model-settings/grok.ts';
@@ -21,10 +22,16 @@ const MODEL_SETTINGS_STRATEGIES: Record<RunnerId, AgentModelSettingsStrategy> = 
   claude: claudeModelSettingsStrategy,
   codex: codexModelSettingsStrategy,
   opencode: opencodeModelSettingsStrategy,
+  // Same config files as OpenCode 1.x; only the serve API differs.
+  opencode2: {
+    runner: 'opencode2',
+    read: (repoRoot, env) => opencodeModelSettingsStrategy.read(repoRoot, env),
+  },
   cursor: cursorModelSettingsStrategy,
   pi: piModelSettingsStrategy,
   junie: junieModelSettingsStrategy,
   copilot: copilotModelSettingsStrategy,
+  antigravity: antigravityModelSettingsStrategy,
   grok: grokModelSettingsStrategy,
 };
 

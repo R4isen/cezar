@@ -9,14 +9,13 @@ import type { AgentConfigFile, Runner } from '@open-mercato/cezar-api-client'
  * #405: one table entry per agent, extension by design). A new agent is one entry
  * here plus its catalog files — no layout or route work.
  *
- * `pi` (#387) is deliberately absent, not forgotten: nothing in `src/agent-config`'s
- * catalog names a pi-owned config file yet, so a pi entry would render three empty
- * groups. It gets a descriptor together with its catalog files. The tab list only
- * ever offers ids from this table, so `descriptorFor` cannot be reached with `pi`.
- * `grok` is absent for the same reason: Grok Build keeps its login in `~/.grok` and
+ * Pi's documented settings and instruction files are catalogued alongside its descriptor. The
+ * tab list only ever offers ids from this table, so `descriptorFor` stays exhaustive.
+ * `grok` stays out of this table: Grok Build keeps its login in `~/.grok` and
  * has no settings file this pane should open. Do not invent catalog entries for it.
  * `copilot` (#582) is the opposite case and IS here: the catalog names its settings,
- * MCP and instruction files, so all three groups have something to show.
+ * MCP and instruction files, so all three groups have something to show — and so
+ * does `antigravity` (settings.json, mcp_config.json, GEMINI.md + AGENTS.md).
  *
  * Group membership derives from the flat `/api/agent-config` listing: a file
  * belongs to an agent when `runners` INCLUDES it (not `runners[0]` — the shared
@@ -110,6 +109,21 @@ export const AGENT_DESCRIPTORS: AgentDescriptor[] = [
     ],
   },
   {
+    id: 'antigravity',
+    label: 'Antigravity',
+    note: EDITOR_PLUS_COMMIT,
+    groups: [
+      group('antigravity', 'settings', 'Settings'),
+      group(
+        'antigravity',
+        'mcp',
+        'MCP',
+        'The shared ~/.gemini/config/mcp_config.json — `agy mcp add|remove` edits the same file.',
+      ),
+      group('antigravity', 'memory', 'Memory & instructions'),
+    ],
+  },
+  {
     id: 'opencode',
     label: 'OpenCode',
     note: EDITOR_PLUS_COMMIT,
@@ -125,6 +139,21 @@ export const AGENT_DESCRIPTORS: AgentDescriptor[] = [
     ],
   },
   {
+    id: 'opencode2',
+    label: 'OpenCode 2',
+    note: EDITOR_PLUS_COMMIT,
+    groups: [
+      group('opencode2', 'settings', 'Settings'),
+      group(
+        'opencode2',
+        'mcp',
+        'MCP',
+        'Same opencode.json as OpenCode. OpenCode 2 drives the 2.x serve API.',
+      ),
+      group('opencode2', 'memory', 'Memory & instructions'),
+    ],
+  },
+  {
     id: 'cursor',
     label: 'Cursor',
     note: 'Cursor Agent CLI (`agent`). Auth via `agent login` or CURSOR_API_KEY. No separate memory file — instructions live in rules/MCP elsewhere.',
@@ -137,6 +166,11 @@ export const AGENT_DESCRIPTORS: AgentDescriptor[] = [
         'User ~/.cursor/mcp.json and project .cursor/mcp.json.',
       ),
     ],
+  },
+  {
+    id: 'pi',
+    label: 'Pi',
+    groups: [group('pi', 'settings', 'Settings'), group('pi', 'memory', 'Memory & instructions')],
   },
 ]
 

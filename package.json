@@ -57,5 +57,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/open-mercato/cezar"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
   }
 }

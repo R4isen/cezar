@@ -100,7 +100,10 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   cursor: 'Cursor',
   pi: 'pi',
   copilot: 'GitHub Copilot CLI',
+  omp: 'OMP',
   antigravity: 'Antigravity',
+  gemini: 'Gemini CLI',
+  kimi: 'Kimi Code',
   grok: 'Grok Build',
 }
 
@@ -114,7 +117,10 @@ const PROVIDER_INSTALL: Record<ProviderId, string> = {
   cursor: 'curl https://cursor.com/install -fsS | bash',
   pi: 'https://github.com/badlogic/pi-mono',
   copilot: 'npm i -g @github/copilot',
+  omp: 'brew install can1357/tap/omp',
   antigravity: 'https://antigravity.google/docs/cli/',
+  gemini: 'npm i -g @google/gemini-cli',
+  kimi: 'https://moonshotai.github.io/kimi-code/',
   grok: 'curl -fsSL https://x.ai/cli/install.sh | bash',
 }
 

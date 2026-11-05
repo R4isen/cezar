@@ -11,7 +11,7 @@ import type {
   ContentBlock,
 } from './agent-runner.ts';
 import type { AgentSession, SessionOptions } from './agent-runner.ts';
-import { prependSystemPrompt, trackChildExit } from './agent-runner.ts';
+import { assertReasoningEffortSupported, prependSystemPrompt, trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
 import { AUTO_END_DELAY_MS, DEFAULT_RUN_TIMEOUT_MS } from './claude-cli-runner.ts';
@@ -92,6 +92,7 @@ export class Opencode2ServerRunner implements AgentRunner {
     onEvent?: (event: AgentEvent) => void,
     opts: SessionOptions = {},
   ): AgentSession {
+    assertReasoningEffortSupported('opencode2', spec.reasoningEffort);
     const session = new OpencodeSession(this.bin, this.timeoutMs, spec, onEvent, opts);
     this.lastSession = session;
     return session;

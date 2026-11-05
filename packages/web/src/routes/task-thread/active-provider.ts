@@ -11,7 +11,10 @@ const PROVIDER_LABEL: Record<Runner, string> = {
   cursor: 'Cursor',
   pi: 'pi',
   copilot: 'GitHub Copilot CLI',
+  omp: 'OMP',
   antigravity: 'Antigravity',
+  gemini: 'Gemini CLI',
+  kimi: 'Kimi Code',
   grok: 'Grok Build',
 }
 

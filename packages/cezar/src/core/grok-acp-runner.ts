@@ -2,6 +2,7 @@ import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:ch
 import { dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  assertReasoningEffortSupported,
   isSignalTerminationExit,
   trackChildExit,
   type AgentBackend,
@@ -83,6 +84,7 @@ export class GrokAcpRunner implements AgentRunner {
   }
 
   startSession(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void, opts: SessionOptions = {}): AgentSession {
+    assertReasoningEffortSupported('grok', spec.reasoningEffort);
     const session = new GrokAcpSession(this.bin, this.backend, spec, spec.timeoutMs ?? this.timeoutMs, onEvent, opts);
     this.lastSession = session;
     return session;

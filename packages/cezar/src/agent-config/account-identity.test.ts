@@ -161,6 +161,7 @@ describe('readAccountIdentity', () => {
     ['pi', 'cezar does not yet read Pi account details from its config folder.'],
     ['junie', 'cezar does not yet read Junie account details from its config folder.'],
     ['copilot', 'cezar does not yet read Copilot account details from its config folder.'],
+    ['omp', 'cezar does not yet read OMP account details from its agent dir (agent.db is its login store).'],
     ['grok', 'cezar does not yet read Grok account details.'],
   ] as const)('%s gets its own unsupported-provider reason without a CLI read', async (provider, reason) => {
     const identity = await readAccountIdentity(provider, home);

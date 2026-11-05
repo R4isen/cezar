@@ -9,8 +9,9 @@ import type { AgentConfigFile, Runner } from '@open-mercato/cezar-api-client'
  * #405: one table entry per agent, extension by design). A new agent is one entry
  * here plus its catalog files — no layout or route work.
  *
- * Pi's documented settings and instruction files are catalogued alongside its descriptor. The
- * tab list only ever offers ids from this table, so `descriptorFor` stays exhaustive.
+ * Pi's documented settings and instruction files are catalogued alongside its descriptor, and
+ * `gemini` (#581) has one because its `settings.json` and `GEMINI.md` are catalogued. The tab
+ * list only ever offers ids from this table, so `descriptorFor` stays exhaustive.
  * `grok` stays out of this table: Grok Build keeps its login in `~/.grok` and
  * has no settings file this pane should open. Do not invent catalog entries for it.
  * `copilot` (#582) is the opposite case and IS here: the catalog names its settings,
@@ -168,9 +169,48 @@ export const AGENT_DESCRIPTORS: AgentDescriptor[] = [
     ],
   },
   {
+    id: 'omp',
+    label: 'OMP',
+    note: EDITOR_PLUS_COMMIT,
+    groups: [
+      group('omp', 'settings', 'Settings'),
+      group(
+        'omp',
+        'mcp',
+        'MCP',
+        'A dedicated mcp.json (key: mcpServers) — project .omp/mcp.json, user ~/.omp/agent/mcp.json.',
+      ),
+      group('omp', 'memory', 'Memory & instructions'),
+    ],
+  },
+  {
     id: 'pi',
     label: 'Pi',
     groups: [group('pi', 'settings', 'Settings'), group('pi', 'memory', 'Memory & instructions')],
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini CLI',
+    note: EDITOR_PLUS_COMMIT,
+    groups: [
+      group('gemini', 'settings', 'Settings'),
+      group(
+        'gemini',
+        'mcp',
+        'MCP',
+        'Under the "mcpServers" key in settings.json — the same file as Gemini CLI’s settings.',
+      ),
+      group('gemini', 'memory', 'Memory & instructions'),
+    ],
+  },
+  {
+    id: 'kimi',
+    label: 'Kimi',
+    note: EDITOR_PLUS_COMMIT,
+    groups: [
+      group('kimi', 'settings', 'Settings'),
+      group('kimi', 'memory', 'Memory & instructions'),
+    ],
   },
 ]
 
